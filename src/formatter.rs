@@ -12,6 +12,7 @@ enum BraceCtx {
     Namespace,
     Function, // function definition body
     Switch,   // switch statement body
+    ExternC,  // extern "C" { } — no extra indentation
     Other,    // initializer list, lambda capture, etc.
 }
 
@@ -47,6 +48,9 @@ struct Fmt<'src> {
     /// once its `{` is consumed. Needed because the `{` is often preceded by
     /// the type's name (an Ident), not the keyword itself.
     pending_type: bool,
+    /// Set when `extern` is seen, kept through the following `LitStr` (`"C"`),
+    /// consumed when `{` is reached to classify the block as `ExternC`.
+    pending_extern_c: bool,
     /// Set when `case`/`default` keyword is emitted so the following `:` gets
     /// a newline after it instead of continuing on the same line.
     in_case_label: bool,
@@ -89,6 +93,7 @@ impl<'src> Fmt<'src> {
             class_depth: 0,
             pending_switch: false,
             pending_type: false,
+            pending_extern_c: false,
             in_case_label: false,
             in_access_label: false,
             suppress_next_space: false,
@@ -273,6 +278,7 @@ impl<'src> Fmt<'src> {
             None => return BraceCtx::Other,
         };
         match prev {
+            TokenKind::LitStr if self.pending_extern_c => BraceCtx::ExternC,
             TokenKind::KwNamespace => BraceCtx::Namespace,
             TokenKind::KwStruct | TokenKind::KwClass | TokenKind::KwUnion | TokenKind::KwEnum => {
                 BraceCtx::Type
@@ -700,8 +706,11 @@ impl<'src> Fmt<'src> {
                     }
                     self.pending_switch = false;
                     self.pending_type = false;
+                    self.pending_extern_c = false;
                     self.brace_stack.push(ctx);
-                    self.indent_level += 1;
+                    if ctx != BraceCtx::ExternC {
+                        self.indent_level += 1;
+                    }
                     self.nl();
                     self.skip_next_newline = true;
                     self.set_prev(TokenKind::LBrace);
@@ -712,7 +721,8 @@ impl<'src> Fmt<'src> {
                     // Discard blank lines right before `}` — trailing blank lines
                     // inside a block are rarely intentional and look odd.
                     self.blank_lines = 0;
-                    if self.indent_level > 0 {
+                    let closing_ctx = self.brace_stack.last().copied().unwrap_or(BraceCtx::Other);
+                    if closing_ctx != BraceCtx::ExternC && self.indent_level > 0 {
                         self.indent_level -= 1;
                     }
                     self.ensure_own_line();
@@ -784,6 +794,7 @@ impl<'src> Fmt<'src> {
                 TokenKind::Semi => {
                     self.flush_blank_lines();
                     self.pending_type = false;
+                    self.pending_extern_c = false;
                     self.write(";");
                     // Don't emit newline if we're inside parens (for-loop header).
                     if self.paren_depth == 0 {
@@ -1034,6 +1045,14 @@ impl<'src> Fmt<'src> {
                         self.indent();
                     } else if self.needs_space(tok.kind) {
                         self.space();
+                    }
+
+                    // Track `extern "C"` sequence for ExternC brace context.
+                    // Keep the flag alive across the LitStr (`"C"`); set it on `extern`;
+                    // clear it on anything else that breaks the sequence.
+                    if !(tok.kind == TokenKind::LitStr && self.pending_extern_c) {
+                        self.pending_extern_c =
+                            tok.kind == TokenKind::Keyword && tok.lexeme == "extern";
                     }
 
                     self.write(tok.lexeme);
@@ -1523,6 +1542,34 @@ mod tests {
         assert!(
             out.contains("} /* extern \"C\" */"),
             "trailing block comment should stay on same line as closing brace, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn extern_c_block_no_indent() {
+        let src = "extern \"C\" {\nint foo(void);\nvoid bar(int x);\n}\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("\nint foo(void);"),
+            "declarations inside extern \"C\" should not be indented, got:\n{out}"
+        );
+        assert!(
+            out.contains("\nvoid bar(int x);"),
+            "declarations inside extern \"C\" should not be indented, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn extern_c_nested_function_still_indents() {
+        let src = "extern \"C\" {\nvoid foo(void) {\nint x = 1;\n}\n}\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("\nvoid foo(void) {"),
+            "function declaration in extern \"C\" should not be indented, got:\n{out}"
+        );
+        assert!(
+            out.contains("\n    int x = 1;"),
+            "body of function inside extern \"C\" should be indented one level, got:\n{out}"
         );
     }
 }

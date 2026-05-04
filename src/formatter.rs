@@ -63,6 +63,11 @@ struct Fmt<'src> {
     /// Set when the last non-whitespace token emitted was a template-closing `>`.
     /// Used to treat `>` like an identifier for call-paren spacing purposes.
     last_was_template_close: bool,
+    /// Stack parallel to paren_depth: `true` if the corresponding `(` opened a
+    /// C-style cast (next non-whitespace token inside was a type keyword).
+    cast_paren_stack: Vec<bool>,
+    /// Set when the last `)` closed a cast paren. Cleared by `set_prev`.
+    last_was_cast_close: bool,
 }
 
 impl<'src> Fmt<'src> {
@@ -89,6 +94,8 @@ impl<'src> Fmt<'src> {
             suppress_next_space: false,
             template_depth: 0,
             last_was_template_close: false,
+            cast_paren_stack: Vec::new(),
+            last_was_cast_close: false,
         }
     }
 
@@ -157,6 +164,7 @@ impl<'src> Fmt<'src> {
     fn set_prev(&mut self, kind: TokenKind) {
         self.prev = Some(kind);
         self.last_was_template_close = false;
+        self.last_was_cast_close = false;
     }
 
     fn space(&mut self) {
@@ -187,6 +195,33 @@ impl<'src> Fmt<'src> {
             self.nl();
         }
         self.indent();
+    }
+
+    // ── Cast detection ────────────────────────────────────────────────────────
+
+    /// True if the next non-whitespace/newline token is a built-in type keyword,
+    /// which strongly suggests the current `(` opens a C-style cast.
+    fn next_is_type_kw(&self) -> bool {
+        let mut i = self.pos;
+        while i < self.tokens.len()
+            && matches!(
+                self.tokens[i].kind,
+                TokenKind::Whitespace | TokenKind::Newline
+            )
+        {
+            i += 1;
+        }
+        matches!(
+            self.tokens.get(i).map(|t| t.kind),
+            Some(
+                TokenKind::Keyword
+                    | TokenKind::KwStruct
+                    | TokenKind::KwClass
+                    | TokenKind::KwUnion
+                    | TokenKind::KwEnum
+                    | TokenKind::KwTypename
+            )
+        )
     }
 
     // ── Inline-comment detection ──────────────────────────────────────────────
@@ -490,6 +525,13 @@ impl<'src> Fmt<'src> {
             return true;
         }
 
+        // After a cast-closing `)`, honour space_after_cast config.
+        // The `next == LParen && prev == RParen` case already returned false above,
+        // so this only fires when the next token is not `(`.
+        if prev == TokenKind::RParen && self.last_was_cast_close {
+            return self.config.spacing.space_after_cast;
+        }
+
         // Default: space between two identifier-like tokens
         true
     }
@@ -703,7 +745,11 @@ impl<'src> Fmt<'src> {
                 // ── Paren depth tracking ──────────────────────────────────────
                 TokenKind::LParen => {
                     self.flush_blank_lines();
-                    if self.needs_space(TokenKind::LParen) {
+                    let is_cast = self.next_is_type_kw();
+                    self.cast_paren_stack.push(is_cast);
+                    if self.at_line_start {
+                        self.indent();
+                    } else if self.needs_space(TokenKind::LParen) {
                         self.space();
                     }
                     self.write("(");
@@ -717,7 +763,10 @@ impl<'src> Fmt<'src> {
                     }
                     self.write(")");
                     self.paren_depth = self.paren_depth.saturating_sub(1);
-                    self.set_prev(TokenKind::RParen);
+                    let is_cast_close = self.cast_paren_stack.pop().unwrap_or(false);
+                    self.prev = Some(TokenKind::RParen);
+                    self.last_was_template_close = false;
+                    self.last_was_cast_close = is_cast_close;
                 }
 
                 // ── Bracket depth tracking ────────────────────────────────────
@@ -1334,6 +1383,39 @@ mod tests {
         assert!(
             !out.lines().any(|l| l.trim() == "public:"),
             "inheritance public wrongly treated as label:\n{out}"
+        );
+    }
+
+    #[test]
+    fn void_cast_statement_indented() {
+        // (void)expr; at block scope must keep indentation and must not gain a
+        // spurious space after the cast when space_after_cast = false (default).
+        let src = "void f() {\n    (void)func();\n    (void)bar(1, 2);\n}\n";
+        let out = fmt(src);
+        assert_eq!(
+            out,
+            "void f() {\n    (void)func();\n    (void)bar(1, 2);\n}\n"
+        );
+    }
+
+    #[test]
+    fn cast_space_after_cast_false() {
+        let src = "void f() { int x = (int)3.14; }\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("(int)3.14"),
+            "space_after_cast=false should produce no space: {out}"
+        );
+    }
+
+    #[test]
+    fn cast_double_cast_no_space() {
+        // Chained casts: (double)(int)x — no space between the two parens.
+        let src = "void f() { double d = (double)(int)x; }\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("(double)(int)x"),
+            "double cast should have no space between: {out}"
         );
     }
 }

@@ -358,6 +358,11 @@ impl<'src> Fmt<'src> {
         if !self.at_func_stmt_start || !self.in_var_decl_block {
             return;
         }
+        // Comments are transparent — a `/* ... */` or `// ...` before the first
+        // real statement does not end the declaration run.
+        if matches!(kind, TokenKind::CommentLine | TokenKind::CommentBlock) {
+            return;
+        }
         self.at_func_stmt_start = false;
         let is_decl =
             Self::is_decl_start(kind) || (kind == TokenKind::Ident && self.ident_starts_decl());
@@ -2739,6 +2744,19 @@ mod tests {
         assert!(
             out.contains("ptr;\n\n"),
             "blank line must follow pointer-to-user-type decl: {out}"
+        );
+    }
+
+    #[test]
+    fn var_decl_block_comment_before_first_decl_is_transparent() {
+        // A leading block comment before the first declaration must not end
+        // the declaration run — the blank line should still appear after the
+        // declarations and before the first real statement.
+        let src = "void f(void) {\n    /* preamble */\n    MyType data;\n    use(data);\n}\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("data;\n\n"),
+            "blank line must follow decl even when preceded by a block comment: {out}"
         );
     }
 

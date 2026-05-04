@@ -644,6 +644,8 @@ impl<'src> Fmt<'src> {
             TokenKind::RParen => {
                 if self.pending_switch {
                     BraceCtx::Switch
+                } else if self.rparen_closes_ctrl_flow() {
+                    BraceCtx::Block
                 } else {
                     BraceCtx::Function
                 }
@@ -2642,6 +2644,38 @@ mod tests {
         assert!(
             out.contains("1;\n\n"),
             "blank line must appear after var decl block by default: {out}"
+        );
+    }
+
+    #[test]
+    fn var_decl_block_no_false_positive_in_for_body() {
+        // A variable declaration inside a for-loop body must not trigger the
+        // blank_line_after_var_decl_block rule — that only applies to the
+        // leading declaration run at function scope.
+        let src = "void f(void) {\n    for (;;) {\n        int c = 1;\n        x++;\n    }\n}\n";
+        let out = fmt(src);
+        assert!(
+            !out.contains("1;\n\n"),
+            "blank line must NOT be inserted after decl inside for body: {out}"
+        );
+    }
+
+    #[test]
+    fn var_decl_block_no_false_positive_in_if_body() {
+        // Same rule: decl inside an if block body must not trigger the feature.
+        let src = "void f(void) {\n    int x = 1;\n    if (x) {\n        const int c = 2;\n        foo(c);\n    }\n}\n";
+        let out = fmt(src);
+        // The blank line after `int x = 1;` (at function scope) is correct.
+        // There must NOT be a blank line after `const int c = 2;` inside the if body.
+        let lines: Vec<&str> = out.lines().collect();
+        let c_line = lines
+            .iter()
+            .position(|l| l.contains("const int c"))
+            .unwrap();
+        assert_ne!(
+            lines.get(c_line + 1).copied().unwrap_or("X"),
+            "",
+            "blank line must NOT follow decl inside if body: {out}"
         );
     }
 

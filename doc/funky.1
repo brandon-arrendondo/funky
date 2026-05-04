@@ -1,0 +1,308 @@
+.TH FUNKY 1 "2026-05-04" "funky 0.2.0" "User Commands"
+.SH NAME
+funky \- C/C++ code formatter with Unicode support
+.SH SYNOPSIS
+.B funky
+[\fIOPTIONS\fR] \fIFILE\fR [\fIFILE\fR ...]
+.SH DESCRIPTION
+.B funky
+reads one or more C or C++ source files, applies whitespace and brace
+formatting rules, and writes the result to standard output (default),
+edits the files in place
+.RB ( \-i ),
+or checks whether any file would change
+.RB ( \-\-check ).
+.PP
+The formatter is Unicode-safe: identifiers, string literals, and comments
+containing multi-byte UTF-8 sequences (CJK characters, accented letters,
+etc.) are preserved verbatim.
+.PP
+Formatting rules are controlled by a
+.I funky.toml
+file in the current directory, or by the file given with
+.BR \-c .
+All configuration keys are optional; built-in defaults are used for any
+keys that are absent.
+.PP
+Pass
+.B \-
+as a file argument to read from standard input and write to standard output.
+.SH OPTIONS
+.TP
+.BR \-i ", " \-\-in\-place
+Edit each file in place instead of writing to standard output.
+Mutually exclusive with
+.BR \-\-check .
+.TP
+.B \-\-check
+Check mode: exit with status 1 if any file would be changed by formatting;
+do not write any output.  The name of each file that would change is
+printed to standard error.
+Mutually exclusive with
+.BR \-i .
+.TP
+.BR \-r ", " \-\-recursive
+Recurse into directories.  Without this flag, passing a directory path is
+an error.  When recursing, only files with recognised C/C++ extensions
+.RB ( .c ", " .cc ", " .cpp ", " .cxx ", " .c++ ", " .h ", " .hh ", " .hpp ", " .hxx )
+are processed.  Files matching patterns in
+.B [ignore]
+are skipped.
+.TP
+.BI \-c " FILE" "\fR,\fP \-\-config " FILE
+Load configuration from
+.I FILE
+instead of the default
+.IR funky.toml .
+.TP
+.BR \-h ", " \-\-help
+Print a brief help message and exit.
+.TP
+.BR \-V ", " \-\-version
+Print the version number and exit.
+.SH CONFIGURATION
+Configuration is read from
+.B funky.toml
+in the current directory, or from the path given with
+.BR \-c .
+The file uses TOML syntax.  All keys are optional.
+.SS [indent]
+.TP
+.B style
+.IR "\"spaces\"" " (default) or " "\"tabs\""
+.TP
+.B width
+Number of spaces per indentation level when
+.B style = "spaces"\c
+\&.
+Default: 4.
+.SS [braces]
+.TP
+.B style
+.IR "\"kr\"" " (default), " "\"allman\"" ", or " "\"stroustrup\"" .
+.RS
+.TP
+.B kr
+Opening brace at end of the controlling line:
+.IR "if (cond) {" .
+.TP
+.B allman
+Opening brace on its own line.
+.TP
+.B stroustrup
+Like K&R, but
+.B else
+and
+.B catch
+start on a new line.
+.RE
+.TP
+.B cuddle_else
+When true (default), place
+.B "} else {"
+on a single line.
+.TP
+.B cuddle_catch
+When true (default), place
+.B "} catch ("
+on a single line.
+.TP
+.B collapse_empty_body
+When true (default), collapse
+.B "{\en}"
+to
+.BR "{}" .
+.TP
+.B fn_brace_newline
+When true (default), force the opening brace of every function definition
+onto its own line, regardless of
+.BR style .
+Control-flow braces are not affected.
+.TP
+.B expand_large_initializers
+When true (default), expand flat initializer lists with multiple elements
+to one element per line.
+.SS [spacing]
+.TP
+.B space_before_call_paren
+Insert a space before
+.B (
+in function calls.
+Default: false.
+.TP
+.B space_before_keyword_paren
+Insert a space before
+.B (
+after keywords such as
+.BR if ", " for ", " while .
+Default: true.
+.TP
+.B space_after_comma
+Insert a space after every
+.BR , .
+Default: true.
+.TP
+.B space_around_binary_ops
+Insert spaces around binary operators.
+Default: true.
+.TP
+.B space_inside_parens
+Insert a space inside
+.B (
+\&...
+.BR ) .
+Default: false.
+.TP
+.B space_inside_brackets
+Insert a space inside
+.B [
+\&...
+.BR ] .
+Default: false.
+.TP
+.B space_after_cast
+Insert a space after a C-style cast.
+Default: false.
+.TP
+.B pointer_align
+Spacing around declarator
+.B *
+and
+.B &\c
+\&.
+.RS
+.TP
+.B "\"type\""
+.I "int* p"
+.TP
+.B "\"name\""
+(default)
+.I "int *p"
+.TP
+.B "\"middle\""
+.I "int * p"
+.RE
+.TP
+.B space_inside_angle_brackets
+Insert spaces inside
+.B <
+\&...
+.B >
+in templates.
+Default: false.
+.TP
+.B align_right_cmt_span
+Column-align trailing
+.B //
+comments across consecutive lines that all have a trailing comment.
+0 disables alignment.
+Default: 3.
+.TP
+.B align_enum_equ_span
+Column-align
+.B =
+signs in consecutive enum value lines.
+0 disables.
+Default: 1.
+.TP
+.B align_doxygen_cmt_span
+Column-align Doxygen
+.B /**<
+member comments across consecutive struct member lines.
+0 disables.
+Default: 1.
+.SS [newlines]
+.TP
+.B style
+.IR "\"lf\"" " (default), " "\"crlf\"" ", or " "\"native\"" .
+.TP
+.B max_blank_lines
+Maximum number of consecutive blank lines preserved.
+Default: 2.
+.TP
+.B final_newline
+Ensure the file ends with a newline.
+Default: true.
+.TP
+.B blank_line_after_var_decl_block
+Insert a blank line between the leading variable-declaration block and
+the first statement in a function body.
+Default: true.
+.TP
+.B blank_line_after_open_brace
+Insert a blank line immediately after the opening
+.B {
+of function bodies and control-flow blocks.
+Default: false.
+.TP
+.B merge_line_comment
+When a standalone
+.B //
+comment immediately follows a
+.BR { ,
+.BR } ,
+or
+.B ;
+with no intervening blank lines, move it to the end of that line as an
+inline trailing comment.
+Default: false.
+.SS [ignore]
+.TP
+.B patterns
+List of glob patterns (relative to the directory root) for files to skip
+when using
+.BR \-\-recursive .
+Example:
+.IR "patterns = [\"vendor/**\", \"*.pb.h\"]" .
+.SH EXIT STATUS
+.TP
+.B 0
+Success (or no files would change in
+.B \-\-check
+mode).
+.TP
+.B 1
+One or more files would change (
+.B \-\-check
+mode only), or a fatal error occurred.
+.SH EXAMPLES
+Format a file to standard output:
+.PP
+.RS
+.B funky src/foo.c
+.RE
+.PP
+Edit multiple files in place:
+.PP
+.RS
+.B funky \-i src/foo.c include/bar.h
+.RE
+.PP
+Check an entire source tree in CI:
+.PP
+.RS
+.B funky \-\-check \-r src/
+.RE
+.PP
+Pipe through standard input:
+.PP
+.RS
+.B cat ugly.c | funky \- > pretty.c
+.RE
+.PP
+Use a project-specific config:
+.PP
+.RS
+.B funky \-c /etc/funky.toml \-i src/
+.RE
+.SH FILES
+.TP
+.I funky.toml
+Default configuration file, searched in the current working directory.
+.SH SEE ALSO
+.BR clang-format (1),
+.BR uncrustify (1)
+.SH AUTHORS
+Brandon Arrendondo and contributors.
+.SH LICENSE
+MIT License.

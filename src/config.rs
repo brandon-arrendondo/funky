@@ -208,6 +208,10 @@ pub struct NewlineConfig {
     /// bodies and control-flow blocks (analogous to uncrustify's
     /// `nl_after_brace_open`).
     pub blank_line_after_open_brace: bool,
+    /// When a standalone `//` comment immediately follows a `{`, `}`, or `;`
+    /// (with no intervening blank lines), hoist it to the end of that
+    /// preceding line as a trailing inline comment.
+    pub merge_line_comment: bool,
 }
 
 impl Default for NewlineConfig {
@@ -218,6 +222,7 @@ impl Default for NewlineConfig {
             final_newline: true,
             blank_line_after_var_decl_block: true,
             blank_line_after_open_brace: false,
+            merge_line_comment: false,
         }
     }
 }
@@ -271,6 +276,7 @@ max_blank_lines = 2
 final_newline   = true
 blank_line_after_var_decl_block = false
 blank_line_after_open_brace     = false
+merge_line_comment              = false
 "#;
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.indent.width, 4);

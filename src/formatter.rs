@@ -1186,7 +1186,20 @@ impl<'src> Fmt<'src> {
 
                 // ── Line comment ──────────────────────────────────────────────
                 TokenKind::CommentLine => {
+                    // Merge: a standalone comment with no blank lines before it
+                    // can be hoisted to the end of the preceding brace/statement
+                    // line when the config flag is set.
+                    let can_merge = self.config.newlines.merge_line_comment
+                        && self.at_line_start
+                        && self.blank_lines == 0
+                        && matches!(
+                            self.prev,
+                            Some(TokenKind::LBrace | TokenKind::RBrace | TokenKind::Semi)
+                        );
                     self.flush_blank_lines();
+                    if can_merge {
+                        self.trim_to_prev_line_end();
+                    }
                     if !self.at_line_start {
                         self.space();
                     } else {
@@ -3206,6 +3219,96 @@ mod tests {
             lines[brace_line + 1],
             "",
             "blank after open brace must be off by default:\n{out}"
+        );
+    }
+
+    fn fmt_merge_comment(src: &str) -> String {
+        let mut config = Config::default();
+        config.newlines.merge_line_comment = true;
+        fmt_with(src, &config)
+    }
+
+    #[test]
+    fn merge_line_comment_after_open_brace() {
+        let src = "void f() {\n// body comment\n    return;\n}\n";
+        let out = fmt_merge_comment(src);
+        let brace_line = out
+            .lines()
+            .find(|l| l.contains('{'))
+            .expect("no brace line");
+        assert!(
+            brace_line.contains("// body comment"),
+            "comment not merged onto open brace line:\n{out}"
+        );
+        // Indented code follows on next line
+        assert!(
+            out.lines().any(|l| l.trim() == "return;"),
+            "return missing:\n{out}"
+        );
+    }
+
+    #[test]
+    fn merge_line_comment_after_close_brace() {
+        let src = "void f() {\n    return;\n}\n// after fn\nvoid g() {}\n";
+        let out = fmt_merge_comment(src);
+        let close_line = out
+            .lines()
+            .find(|l| l.trim_start() == "}" || l.trim_start().starts_with("} "))
+            .expect("no close brace line");
+        assert!(
+            close_line.contains("// after fn"),
+            "comment not merged onto close brace line:\n{out}"
+        );
+    }
+
+    #[test]
+    fn merge_line_comment_after_semi() {
+        let src = "void f() {\n    int x = 1;\n// about x\n    foo(x);\n}\n";
+        let out = fmt_merge_comment(src);
+        let semi_line = out
+            .lines()
+            .find(|l| l.contains("int x"))
+            .expect("no int x line");
+        assert!(
+            semi_line.contains("// about x"),
+            "comment not merged onto statement line:\n{out}"
+        );
+    }
+
+    #[test]
+    fn merge_line_comment_blank_line_prevents_merge() {
+        // A blank line between the brace and the comment must suppress merging.
+        let src = "void f() {\n\n// not merged\n    return;\n}\n";
+        let out = fmt_merge_comment(src);
+        let brace_line = out
+            .lines()
+            .find(|l| l.ends_with('{'))
+            .expect("no open brace line");
+        assert!(
+            !brace_line.contains("//"),
+            "comment must not merge when blank line present:\n{out}"
+        );
+        assert!(
+            out.lines().any(|l| l.trim() == "// not merged"),
+            "standalone comment missing:\n{out}"
+        );
+    }
+
+    #[test]
+    fn merge_line_comment_disabled_by_default() {
+        let src = "void f() {\n// comment\n    return;\n}\n";
+        let out = fmt(src);
+        let brace_line = out
+            .lines()
+            .find(|l| l.ends_with('{'))
+            .expect("no open brace line");
+        assert!(
+            !brace_line.contains("//"),
+            "merge_line_comment must be off by default:\n{out}"
+        );
+        assert!(
+            out.lines().any(|l| l.trim() == "// comment"),
+            "standalone comment must remain on its own line:\n{out}"
         );
     }
 }

@@ -96,6 +96,10 @@ pub struct BraceConfig {
     pub cuddle_catch: bool,
     /// Collapse `{\n}` to `{}` when the body is empty.
     pub collapse_empty_body: bool,
+    /// Expand flat initializers that exceed `small_initializer_end`'s token
+    /// limit to one element per line.  Nested-brace initializers are not
+    /// affected (they fall through to normal block formatting).
+    pub expand_large_initializers: bool,
 }
 
 impl Default for BraceConfig {
@@ -105,6 +109,7 @@ impl Default for BraceConfig {
             cuddle_else: true,
             cuddle_catch: true,
             collapse_empty_body: true,
+            expand_large_initializers: true,
         }
     }
 }
@@ -228,6 +233,7 @@ style = "kr"
 cuddle_else = true
 cuddle_catch = true
 collapse_empty_body = true
+expand_large_initializers = false
 
 [spacing]
 space_before_call_paren    = false

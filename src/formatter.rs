@@ -27,6 +27,9 @@ struct Fmt<'src> {
     indent_level: u32,
     /// Stack tracking what each `{` opened.
     brace_stack: Vec<BraceCtx>,
+    /// Parallel to `brace_stack`: true when the corresponding `{` opened a
+    /// flat large initializer that should be expanded one element per line.
+    large_init_stack: Vec<bool>,
     /// Depth inside `(…)` — used to suppress newlines after `;` in for-headers.
     paren_depth: u32,
     /// Depth inside `[…]`.
@@ -104,6 +107,7 @@ impl<'src> Fmt<'src> {
             at_line_start: true,
             indent_level: 0,
             brace_stack: Vec::new(),
+            large_init_stack: Vec::new(),
             paren_depth: 0,
             bracket_depth: 0,
             blank_lines: 0,
@@ -460,6 +464,21 @@ impl<'src> Fmt<'src> {
                         return None;
                     }
                 }
+            }
+        }
+        None
+    }
+
+    /// Scans forward from `self.pos` looking for the matching `}`.
+    /// Returns `Some(rbrace_index)` only when there are no nested `{` tokens
+    /// (i.e. the initializer is flat).  Returns `None` when a nested `{` is
+    /// found, so callers fall back to normal block formatting.
+    fn large_flat_initializer_end(&self) -> Option<usize> {
+        for (offset, tk) in self.tokens[self.pos..].iter().enumerate() {
+            match tk.kind {
+                TokenKind::LBrace => return None,
+                TokenKind::RBrace => return Some(self.pos + offset),
+                _ => {}
             }
         }
         None
@@ -1179,7 +1198,11 @@ impl<'src> Fmt<'src> {
                     self.pending_switch = false;
                     self.pending_type = false;
                     self.pending_extern_c = false;
+                    let is_large_init = ctx == BraceCtx::Other
+                        && self.config.braces.expand_large_initializers
+                        && self.large_flat_initializer_end().is_some();
                     self.brace_stack.push(ctx);
+                    self.large_init_stack.push(is_large_init);
                     if ctx != BraceCtx::ExternC {
                         self.indent_level += 1;
                     }
@@ -1201,6 +1224,7 @@ impl<'src> Fmt<'src> {
                     self.write("}");
 
                     let ctx = self.brace_stack.pop().unwrap_or(BraceCtx::Other);
+                    self.large_init_stack.pop();
 
                     if ctx == BraceCtx::Switch {
                         self.switch_depth = self.switch_depth.saturating_sub(1);
@@ -1505,6 +1529,20 @@ impl<'src> Fmt<'src> {
                     self.set_prev(tok.kind);
                 }
 
+                // ── Comma — newline after each element in large initializers ──
+                TokenKind::Comma => {
+                    self.flush_blank_lines();
+                    if self.at_line_start {
+                        self.indent();
+                    }
+                    self.write(",");
+                    if self.large_init_stack.last() == Some(&true) && self.paren_depth == 0 {
+                        self.nl();
+                        self.skip_next_newline = true;
+                    }
+                    self.set_prev(TokenKind::Comma);
+                }
+
                 // ── Everything else ───────────────────────────────────────────
                 _ => {
                     self.flush_blank_lines();
@@ -1744,6 +1782,7 @@ mod tests {
                 cuddle_else: false,
                 cuddle_catch: false,
                 collapse_empty_body: false,
+                expand_large_initializers: true,
             },
             ..Config::default()
         };
@@ -1784,6 +1823,7 @@ mod tests {
                 cuddle_else: false,
                 cuddle_catch: false,
                 collapse_empty_body: false,
+                expand_large_initializers: true,
             },
             ..Config::default()
         };
@@ -1812,6 +1852,42 @@ mod tests {
         assert!(
             out.trim_end().ends_with("= { 1, 2, 3 };"),
             "expected inline initializer, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn large_initializer_expands_one_per_line() {
+        // 9 elements (17 non-ws tokens) exceeds the small-init threshold of 16.
+        let src = "int a[9] = {0, 1, 2, 3, 4, 5, 6, 7, 8};";
+        let out = fmt(src);
+        assert!(
+            out.contains("{\n    0,\n    1,"),
+            "large initializer should expand one element per line, got:\n{out}"
+        );
+        assert!(
+            out.contains("    8\n};"),
+            "last element must not have trailing comma, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn large_initializer_expand_disabled() {
+        use crate::config::{BraceConfig, BraceStyle};
+        let config = Config {
+            braces: BraceConfig {
+                style: BraceStyle::Kr,
+                cuddle_else: true,
+                cuddle_catch: true,
+                collapse_empty_body: true,
+                expand_large_initializers: false,
+            },
+            ..Config::default()
+        };
+        let src = "int a[9] = {0, 1, 2, 3, 4, 5, 6, 7, 8};";
+        let out = fmt_with(src, &config);
+        assert!(
+            !out.contains("0,\n"),
+            "expand_large_initializers=false should keep inline, got:\n{out}"
         );
     }
 

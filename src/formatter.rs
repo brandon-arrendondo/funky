@@ -970,6 +970,13 @@ impl<'src> Fmt<'src> {
                         .replace("\r\n", "\n")
                         .replace('\r', "\n")
                         .replace('\n', nl);
+                    // Ensure the closing `*/` has a leading space when it sits
+                    // flush at the start of a line (e.g. `\n*/` → `\n */`).
+                    let normalized = if normalized.contains(&format!("{nl}*/")) {
+                        normalized.replace(&format!("{nl}*/"), &format!("{nl} */"))
+                    } else {
+                        normalized
+                    };
                     self.write(&normalized);
                     self.set_prev(TokenKind::CommentBlock);
                 }
@@ -2206,6 +2213,29 @@ mod tests {
         assert!(
             !out.contains(";--i") && out.contains("; --i"),
             "semicolon before -- must have a space: {out}"
+        );
+    }
+
+    #[test]
+    fn block_comment_closing_gets_space() {
+        let out = fmt("/*\n * foo\n*/\nvoid f() {}\n");
+        assert!(
+            out.contains(" */"),
+            "closing */ must have a leading space, got:\n{out}"
+        );
+        assert!(
+            !out.contains("\n*/"),
+            "closing */ must not be flush at line start, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn block_comment_closing_already_spaced_unchanged() {
+        let src = "/*\n * foo\n */\nvoid f() {}\n";
+        let out = fmt(src);
+        assert!(
+            out.contains(" */") && !out.contains("  */"),
+            "already-correct */ must not be double-spaced, got:\n{out}"
         );
     }
 }

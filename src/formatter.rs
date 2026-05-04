@@ -7,10 +7,11 @@ use crate::token::{Token, TokenKind};
 /// What opened the most recent `{`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BraceCtx {
-    Block,    // if/for/while/do/else/try/catch
-    Type,     // struct/class/union/enum
+    Block, // if/for/while/do/else/try/catch
+    Type,  // struct/class/union/enum
     Namespace,
     Function, // function definition body
+    Switch,   // switch statement body
     Other,    // initializer list, lambda capture, etc.
 }
 
@@ -36,6 +37,13 @@ struct Fmt<'src> {
     skip_next_newline: bool,
     /// The last non-whitespace, non-newline token kind we emitted.
     prev: Option<TokenKind>,
+    /// Number of switch bodies we are currently inside — used to dedent case/default.
+    switch_depth: u32,
+    /// Set when `switch` keyword is emitted; cleared once its `{` is consumed.
+    pending_switch: bool,
+    /// Set when `case`/`default` keyword is emitted so the following `:` gets
+    /// a newline after it instead of continuing on the same line.
+    in_case_label: bool,
 }
 
 impl<'src> Fmt<'src> {
@@ -53,6 +61,9 @@ impl<'src> Fmt<'src> {
             blank_lines: 0,
             skip_next_newline: false,
             prev: None,
+            switch_depth: 0,
+            pending_switch: false,
+            in_case_label: false,
         }
     }
 
@@ -165,11 +176,16 @@ impl<'src> Fmt<'src> {
         };
         match prev {
             TokenKind::KwNamespace => BraceCtx::Namespace,
-            TokenKind::KwStruct
-            | TokenKind::KwClass
-            | TokenKind::KwUnion
-            | TokenKind::KwEnum => BraceCtx::Type,
-            TokenKind::RParen => BraceCtx::Function, // function params or control
+            TokenKind::KwStruct | TokenKind::KwClass | TokenKind::KwUnion | TokenKind::KwEnum => {
+                BraceCtx::Type
+            }
+            TokenKind::RParen => {
+                if self.pending_switch {
+                    BraceCtx::Switch
+                } else {
+                    BraceCtx::Function
+                }
+            }
             TokenKind::KwElse | TokenKind::KwDo | TokenKind::KwTry => BraceCtx::Block,
             TokenKind::Ident => {
                 // Likely a function definition body.
@@ -412,24 +428,26 @@ impl<'src> Fmt<'src> {
                             }
                             self.write("{");
                         }
-                        _ => {
-                            match self.config.braces.style {
-                                BraceStyle::Allman => {
-                                    self.ensure_own_line();
-                                    self.write("{");
-                                }
-                                BraceStyle::Kr | BraceStyle::Stroustrup => {
-                                    if !self.at_line_start {
-                                        self.space();
-                                    } else {
-                                        self.indent();
-                                    }
-                                    self.write("{");
-                                }
+                        _ => match self.config.braces.style {
+                            BraceStyle::Allman => {
+                                self.ensure_own_line();
+                                self.write("{");
                             }
-                        }
+                            BraceStyle::Kr | BraceStyle::Stroustrup => {
+                                if !self.at_line_start {
+                                    self.space();
+                                } else {
+                                    self.indent();
+                                }
+                                self.write("{");
+                            }
+                        },
                     }
 
+                    if ctx == BraceCtx::Switch {
+                        self.switch_depth += 1;
+                    }
+                    self.pending_switch = false;
                     self.brace_stack.push(ctx);
                     self.indent_level += 1;
                     self.nl();
@@ -449,6 +467,10 @@ impl<'src> Fmt<'src> {
                     self.write("}");
 
                     let ctx = self.brace_stack.pop().unwrap_or(BraceCtx::Other);
+
+                    if ctx == BraceCtx::Switch {
+                        self.switch_depth = self.switch_depth.saturating_sub(1);
+                    }
 
                     // Semicolon required after type definitions and namespace
                     let needs_semi = matches!(ctx, BraceCtx::Type);
@@ -483,9 +505,9 @@ impl<'src> Fmt<'src> {
                         _ => false,
                     };
 
-                    if typedef_name {
-                        self.space();
-                    } else if cuddle && matches!(self.config.braces.style, BraceStyle::Kr) {
+                    if typedef_name
+                        || (cuddle && matches!(self.config.braces.style, BraceStyle::Kr))
+                    {
                         self.space();
                     } else if cuddle
                         && matches!(self.config.braces.style, BraceStyle::Stroustrup)
@@ -562,10 +584,44 @@ impl<'src> Fmt<'src> {
                 TokenKind::Colon => {
                     self.flush_blank_lines();
                     self.write(":");
-                    // For case/default, peek to see if we need indent adjustment.
-                    // We just emit newline and let the next token be indented.
-                    // (A full implementation would track case-label depth.)
+                    if self.in_case_label {
+                        self.in_case_label = false;
+                        self.nl();
+                        self.skip_next_newline = true;
+                    }
                     self.prev = Some(TokenKind::Colon);
+                }
+
+                // ── switch keyword — arm to set pending_switch ────────────────
+                TokenKind::KwSwitch => {
+                    self.flush_blank_lines();
+                    if self.at_line_start {
+                        self.indent();
+                    } else if self.needs_space(tok.kind) {
+                        self.space();
+                    }
+                    self.pending_switch = true;
+                    self.write(tok.lexeme);
+                    self.prev = Some(tok.kind);
+                }
+
+                // ── case / default labels — dedented to switch level ──────────
+                TokenKind::KwCase | TokenKind::KwDefault => {
+                    self.flush_blank_lines();
+                    if self.at_line_start {
+                        // Dedent one level relative to the switch body.
+                        let saved = self.indent_level;
+                        if self.switch_depth > 0 && self.indent_level > 0 {
+                            self.indent_level -= 1;
+                        }
+                        self.indent();
+                        self.indent_level = saved;
+                    } else if self.needs_space(tok.kind) {
+                        self.space();
+                    }
+                    self.in_case_label = true;
+                    self.write(tok.lexeme);
+                    self.prev = Some(tok.kind);
                 }
 
                 // ── Everything else ───────────────────────────────────────────
@@ -597,10 +653,7 @@ impl<'src> Fmt<'src> {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-pub fn format<'src>(
-    tokens: &[Token<'src>],
-    config: &Config,
-) -> Result<String, FunkyError> {
+pub fn format<'src>(tokens: &[Token<'src>], config: &Config) -> Result<String, FunkyError> {
     Fmt::new(config, tokens).format()
 }
 
@@ -648,11 +701,13 @@ mod tests {
     #[test]
     fn allman_brace_style() {
         use crate::config::{BraceConfig, BraceStyle};
-        let mut config = Config::default();
-        config.braces = BraceConfig {
-            style: BraceStyle::Allman,
-            cuddle_else: false,
-            cuddle_catch: false,
+        let config = Config {
+            braces: BraceConfig {
+                style: BraceStyle::Allman,
+                cuddle_else: false,
+                cuddle_catch: false,
+            },
+            ..Config::default()
         };
         let src = "if(x){y=1;}";
         let out = fmt_with(src, &config);
@@ -673,7 +728,10 @@ mod tests {
         let src = "int x = 1; // note\nint y = 2;\n";
         let out = fmt(src);
         // Comment must stay on the same line as the statement.
-        let line = out.lines().find(|l| l.contains("int x")).expect("no x line");
+        let line = out
+            .lines()
+            .find(|l| l.contains("int x"))
+            .expect("no x line");
         assert!(line.contains("// note"), "comment moved off line: {out}");
         // Subsequent statement must be on its own line.
         assert!(out.contains("\nint y"), "y not on new line: {out}");
@@ -683,17 +741,28 @@ mod tests {
     fn inline_comment_after_semi_unicode() {
         let src = "int x = 1; // 变量定义\n";
         let out = fmt(src);
-        let line = out.lines().find(|l| l.contains("int x")).expect("no x line");
-        assert!(line.contains("// 变量定义"), "unicode comment moved off line: {out}");
+        let line = out
+            .lines()
+            .find(|l| l.contains("int x"))
+            .expect("no x line");
+        assert!(
+            line.contains("// 变量定义"),
+            "unicode comment moved off line: {out}"
+        );
     }
 
     #[test]
     fn inline_comment_after_brace() {
         let src = "void f() {\n    return;\n} // end\n";
         let out = fmt(src);
-        let brace_line = out.lines().find(|l| l.trim_start().starts_with('}'))
+        let brace_line = out
+            .lines()
+            .find(|l| l.trim_start().starts_with('}'))
             .expect("no } line");
-        assert!(brace_line.contains("// end"), "comment not on }} line:\n{out}");
+        assert!(
+            brace_line.contains("// end"),
+            "comment not on }} line:\n{out}"
+        );
     }
 
     #[test]
@@ -701,10 +770,43 @@ mod tests {
         let src = "int x = 1;\n// standalone\nint y = 2;\n";
         let out = fmt(src);
         // The x-line must not contain the comment.
-        let x_line = out.lines().find(|l| l.contains("int x")).expect("no x line");
-        assert!(!x_line.contains("//"), "standalone comment merged into x line:\n{out}");
+        let x_line = out
+            .lines()
+            .find(|l| l.contains("int x"))
+            .expect("no x line");
+        assert!(
+            !x_line.contains("//"),
+            "standalone comment merged into x line:\n{out}"
+        );
         // The comment must appear on its own line.
-        assert!(out.lines().any(|l| l.trim() == "// standalone"), "standalone comment missing:\n{out}");
+        assert!(
+            out.lines().any(|l| l.trim() == "// standalone"),
+            "standalone comment missing:\n{out}"
+        );
+    }
+
+    #[test]
+    fn switch_case_indentation() {
+        let src = "void f(int x){switch(x){case 1:y=1;break;case 2:y=2;break;default:y=0;break;}}";
+        let out = fmt(src);
+        // case/default labels must be at switch indent level (4 spaces, not 8).
+        assert!(
+            out.lines().any(|l| l == "    case 1:"),
+            "case 1 not at switch level:\n{out}"
+        );
+        assert!(
+            out.lines().any(|l| l == "    case 2:"),
+            "case 2 not at switch level:\n{out}"
+        );
+        assert!(
+            out.lines().any(|l| l == "    default:"),
+            "default not at switch level:\n{out}"
+        );
+        // Body inside case must be indented one further level (8 spaces).
+        assert!(
+            out.lines().any(|l| l.starts_with("        y")),
+            "case body not indented deeper than label:\n{out}"
+        );
     }
 
     #[test]

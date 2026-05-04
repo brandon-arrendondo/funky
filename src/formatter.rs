@@ -885,6 +885,25 @@ impl<'src> Fmt<'src> {
                     self.set_prev(tok.kind);
                 }
 
+                // ── Unary / binary * and & (non-declarator context) ──────────
+                // In unary context (prev does not end an expression), suppress
+                // the space after the operator so `*ptr` and `&x` are not
+                // mangled into `* ptr` / `& x`.
+                TokenKind::Star | TokenKind::Amp => {
+                    self.flush_blank_lines();
+                    let is_binary = self.prev.is_some_and(|p| p.ends_expr());
+                    if self.at_line_start {
+                        self.indent();
+                    } else if self.needs_space(tok.kind) {
+                        self.space();
+                    }
+                    if !is_binary {
+                        self.suppress_next_space = true;
+                    }
+                    self.write(tok.lexeme);
+                    self.set_prev(tok.kind);
+                }
+
                 // ── Type keywords — mark pending_type for brace context ──────
                 TokenKind::KwClass
                 | TokenKind::KwStruct
@@ -1168,6 +1187,36 @@ mod tests {
         let src = "int r=a*b;";
         let out = fmt_with(src, &config);
         assert!(out.contains("a * b"), "multiplication spaces: got\n{out}");
+    }
+
+    #[test]
+    fn unary_dereference_no_space() {
+        let src = "int x=*ptr;";
+        let out = fmt(src);
+        assert!(
+            out.contains("*ptr"),
+            "unary * must not gain a space: got\n{out}"
+        );
+    }
+
+    #[test]
+    fn unary_address_of_no_space() {
+        let src = "int*p=&data;";
+        let out = fmt(src);
+        assert!(
+            out.contains("&data"),
+            "unary & must not gain a space: got\n{out}"
+        );
+    }
+
+    #[test]
+    fn unary_address_of_after_assign_no_space() {
+        let src = "p=&x;";
+        let out = fmt(src);
+        assert!(
+            out.contains("&x"),
+            "unary & after = must not gain a space: got\n{out}"
+        );
     }
 
     #[test]

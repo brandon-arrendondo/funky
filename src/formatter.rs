@@ -358,9 +358,12 @@ impl<'src> Fmt<'src> {
         if !self.at_func_stmt_start || !self.in_var_decl_block {
             return;
         }
-        // Comments are transparent — a `/* ... */` or `// ...` before the first
-        // real statement does not end the declaration run.
-        if matches!(kind, TokenKind::CommentLine | TokenKind::CommentBlock) {
+        // Comments before the first declaration are transparent — a preamble
+        // `/* ... */` does not end the declaration run before it has started.
+        // Once we have seen at least one declaration (saw_func_decl = true),
+        // a standalone comment marks the end of the block so the blank line
+        // is placed before it (matching uncrustify).
+        if matches!(kind, TokenKind::CommentLine | TokenKind::CommentBlock) && !self.saw_func_decl {
             return;
         }
         self.at_func_stmt_start = false;
@@ -1829,6 +1832,10 @@ pub fn format<'src>(tokens: &[Token<'src>], config: &Config) -> Result<String, F
 /// Returns the byte index of the `//` or `/*` that starts a trailing inline
 /// comment on `line`, or `None` if the line has no trailing comment (standalone
 /// comment lines and blank lines also return `None`).
+///
+/// A `/* */` comment is only considered trailing when nothing non-whitespace
+/// follows its closing `*/` — this prevents mid-expression block comments like
+/// `2 /* two bytes */ +` from being treated as trailing comments.
 fn trailing_comment_col(line: &str) -> Option<usize> {
     let trimmed = line.trim_start();
     if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("/*") {
@@ -1848,7 +1855,22 @@ fn trailing_comment_col(line: &str) -> Option<usize> {
             }
             let before = &line[..i];
             if before.bytes().any(|b| b != b' ' && b != b'\t') {
-                return Some(i);
+                if bytes[i + 1] == b'/' {
+                    // `//` extends to end of line — always trailing.
+                    return Some(i);
+                }
+                // `/* */` — only trailing when nothing non-whitespace follows `*/`.
+                let mut j = i + 2;
+                while j + 1 < bytes.len() {
+                    if bytes[j] == b'*' && bytes[j + 1] == b'/' {
+                        let after = &line[j + 2..];
+                        if !after.bytes().any(|b| b != b' ' && b != b'\t') {
+                            return Some(i);
+                        }
+                        break; // code after `*/` — not a trailing comment
+                    }
+                    j += 1;
+                }
             }
         }
         i += 1;

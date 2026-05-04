@@ -293,6 +293,26 @@ impl<'src> Fmt<'src> {
         )
     }
 
+    /// True when we're at statement start and the current token is an Ident that
+    /// begins a user-defined-type declaration (`TypeName varName;`).  In C/C++,
+    /// `ident ident` at statement scope is always a declaration — there is no
+    /// non-declaration statement in that form.  Scans ahead skipping WS and any
+    /// leading `*`/`&` (pointer/reference declarators) to find the variable name.
+    fn ident_starts_decl(&self) -> bool {
+        let mut i = self.pos;
+        loop {
+            let Some(tk) = self.tokens.get(i) else {
+                return false;
+            };
+            match tk.kind {
+                TokenKind::Whitespace | TokenKind::Newline => i += 1,
+                TokenKind::Star => i += 1,
+                TokenKind::Ident => return true,
+                _ => return false,
+            }
+        }
+    }
+
     /// Emit the newline/space after a `}` based on what follows.
     /// Called from both the RBrace arm and the LBrace empty-body collapse path.
     fn emit_post_brace_spacing(
@@ -339,7 +359,9 @@ impl<'src> Fmt<'src> {
             return;
         }
         self.at_func_stmt_start = false;
-        if Self::is_decl_start(kind) {
+        let is_decl =
+            Self::is_decl_start(kind) || (kind == TokenKind::Ident && self.ident_starts_decl());
+        if is_decl {
             self.saw_func_decl = true;
         } else {
             self.in_var_decl_block = false;
@@ -2693,6 +2715,30 @@ mod tests {
             lines.get(c_line + 1).copied().unwrap_or("X"),
             "",
             "blank line must NOT follow decl inside if body: {out}"
+        );
+    }
+
+    #[test]
+    fn var_decl_block_user_defined_type() {
+        // `TypeName var;` where TypeName is a user-defined type (Ident, not a keyword)
+        // must be treated as a declaration so the blank-line rule fires.
+        let src =
+            "void f(void) {\n    SerialComm_T data;\n    memset(&data, 0, sizeof(data));\n}\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("data;\n\n"),
+            "blank line must follow user-defined-type decl: {out}"
+        );
+    }
+
+    #[test]
+    fn var_decl_block_user_defined_type_pointer() {
+        // Pointer to user-defined type: `TypeName *ptr;` should also count.
+        let src = "void f(void) {\n    MyType *ptr;\n    use(ptr);\n}\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("ptr;\n\n"),
+            "blank line must follow pointer-to-user-type decl: {out}"
         );
     }
 

@@ -1291,7 +1291,8 @@ impl<'src> Fmt<'src> {
                                 // their own line even in KR mode.  Control-flow
                                 // constructs (if/for/while/switch) always stay on the
                                 // same line.
-                                let fn_newline = ctx == BraceCtx::Function
+                                let fn_newline = (ctx == BraceCtx::Function
+                                    || ctx == BraceCtx::ExternC)
                                     && self.config.braces.fn_brace_newline
                                     && !self.rparen_closes_ctrl_flow();
                                 if fn_newline {
@@ -2810,6 +2811,25 @@ mod tests {
         assert!(
             out.contains("\nvoid bar(int x);"),
             "declarations inside extern \"C\" should not be indented, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn extern_c_brace_newline_respects_fn_brace_newline() {
+        // fn_brace_newline=true (default) must put the { on its own line for extern "C".
+        let src = "extern \"C\" {\nint foo(void);\n}\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("extern \"C\"\n{"),
+            "extern \"C\" {{ should be split to own line when fn_brace_newline=true, got:\n{out}"
+        );
+        // fn_brace_newline=false: { stays on same line.
+        let mut cfg = Config::default();
+        cfg.braces.fn_brace_newline = false;
+        let out2 = fmt_with(src, &cfg);
+        assert!(
+            out2.contains("extern \"C\" {"),
+            "extern \"C\" {{ should stay on same line when fn_brace_newline=false, got:\n{out2}"
         );
     }
 

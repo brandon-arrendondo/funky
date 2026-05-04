@@ -18,7 +18,7 @@ space_around_binary_ops    = true
 space_inside_parens        = false
 space_inside_brackets      = false
 space_after_cast           = false
-pointer_align              = "middle"  # "type" (int* p), "name" (int *p), "middle" (int * p)
+pointer_align              = "name"    # "type" (int* p), "name" (int *p), "middle" (int * p)
 space_inside_angle_brackets = false    # false: vector<int>   true: vector< int >
 
 [newlines]

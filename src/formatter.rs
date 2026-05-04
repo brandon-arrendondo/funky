@@ -1460,11 +1460,18 @@ impl<'src> Fmt<'src> {
 
 pub fn format<'src>(tokens: &[Token<'src>], config: &Config) -> Result<String, FunkyError> {
     let output = Fmt::new(config, tokens).format()?;
-    if config.spacing.align_right_cmt_span > 0 {
-        Ok(align_trailing_comments(&output, config.newline_str()))
+    let nl = config.newline_str();
+    let output = if config.spacing.align_right_cmt_span > 0 {
+        align_trailing_comments(&output, nl)
     } else {
-        Ok(output)
-    }
+        output
+    };
+    let output = if config.spacing.align_enum_equ_span > 0 {
+        align_enum_equals(&output, nl)
+    } else {
+        output
+    };
+    Ok(output)
 }
 
 /// Returns the byte index of the `//` that starts a trailing inline comment on
@@ -1519,6 +1526,78 @@ fn align_trailing_comments(output: &str, nl: &str) -> String {
                     let comment = &lines[k][col..];
                     let pad = target - code.len();
                     result[k] = format!("{}{}{}", code, " ".repeat(pad), comment);
+                }
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+
+    result.join(nl)
+}
+
+/// Returns the byte index of the `=` assignment operator in an enum value line
+/// (e.g. `    FOO = 3,`), or `None` if the line isn't an enum value with `=`.
+///
+/// Requires the line to end with `,` to avoid false-positives inside function
+/// bodies. Skips compound operators (`==`, `!=`, `<=`, `>=`, `+=`, …).
+fn enum_eq_col(line: &str) -> Option<usize> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with(|c: char| c.is_alphabetic() || c == '_') {
+        return None;
+    }
+    if !trimmed.trim_end().ends_with(',') {
+        return None;
+    }
+    let bytes = line.as_bytes();
+    for i in 0..bytes.len() {
+        if bytes[i] != b'=' {
+            continue;
+        }
+        if i + 1 < bytes.len() && bytes[i + 1] == b'=' {
+            continue; // ==
+        }
+        if i > 0
+            && matches!(
+                bytes[i - 1],
+                b'!' | b'<' | b'>' | b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|' | b'^'
+            )
+        {
+            continue; // compound op
+        }
+        return Some(i);
+    }
+    None
+}
+
+/// Align `=` signs within groups of consecutive enum value lines.
+fn align_enum_equals(output: &str, nl: &str) -> String {
+    let lines: Vec<&str> = output.split(nl).collect();
+    let n = lines.len();
+    let cols: Vec<Option<usize>> = lines.iter().map(|l| enum_eq_col(l)).collect();
+    let mut result: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+
+    let mut i = 0;
+    while i < n {
+        if cols[i].is_some() {
+            let mut j = i + 1;
+            while j < n && cols[j].is_some() {
+                j += 1;
+            }
+            if j > i + 1 {
+                // Widest name (trimmed) determines the target column.
+                let max_name_len = (i..j)
+                    .map(|k| lines[k][..cols[k].unwrap()].trim_end().len())
+                    .max()
+                    .unwrap();
+                let target = max_name_len + 1;
+                for k in i..j {
+                    let col = cols[k].unwrap();
+                    let name = lines[k][..col].trim_end();
+                    let rest = &lines[k][col..]; // starts with `= …`
+                    let pad = target - name.len();
+                    result[k] = format!("{}{}{}", name, " ".repeat(pad), rest);
                 }
             }
             i = j;
@@ -2361,5 +2440,74 @@ mod tests {
         assert_eq!(cols.len(), 3, "expected 3 inline comments, got:\n{out}");
         // First two should be aligned (same group); third may differ.
         assert_eq!(cols[0], cols[1], "group-1 comments not aligned:\n{out}");
+    }
+
+    fn cfg_enum_align(span: usize) -> Config {
+        Config {
+            spacing: SpacingConfig {
+                align_enum_equ_span: span,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn align_enum_equals_basic() {
+        let src = "enum Color { RED = 0,\nGREEN = 1,\nBLUE_DARK = 2,\nWHITE = 3,\n};\n";
+        let out = fmt_with(src, &cfg_enum_align(1));
+        let positions: Vec<usize> = out.lines().filter_map(enum_eq_col).collect();
+        assert_eq!(
+            positions.len(),
+            4,
+            "expected 4 enum value lines, got:\n{out}"
+        );
+        assert!(
+            positions.iter().all(|&c| c == positions[0]),
+            "enum = signs not aligned: columns={positions:?}\n{out}"
+        );
+    }
+
+    #[test]
+    fn align_enum_equals_off_by_default() {
+        let src = "enum E { A = 1,\nLONG_NAME = 2,\n};\n";
+        let out = fmt(src);
+        let positions: Vec<usize> = out.lines().filter_map(enum_eq_col).collect();
+        assert_eq!(
+            positions.len(),
+            2,
+            "expected 2 enum value lines, got:\n{out}"
+        );
+        assert_ne!(
+            positions[0], positions[1],
+            "enum = should NOT be aligned when feature is off:\n{out}"
+        );
+    }
+
+    #[test]
+    fn align_enum_equals_blank_line_breaks_group() {
+        let src = "enum E { A = 1,\nLONG_NAME = 2,\n\nC = 10,\nD = 11,\n};\n";
+        let out = fmt_with(src, &cfg_enum_align(1));
+        let positions: Vec<usize> = out.lines().filter_map(enum_eq_col).collect();
+        assert_eq!(
+            positions.len(),
+            4,
+            "expected 4 enum value lines, got:\n{out}"
+        );
+        // First two are in group-1 and must be aligned.
+        assert_eq!(positions[0], positions[1], "group-1 = not aligned:\n{out}");
+        // Last two are in group-2 (both 1-char names, already equal).
+        assert_eq!(positions[2], positions[3], "group-2 = not aligned:\n{out}");
+    }
+
+    #[test]
+    fn align_enum_equals_does_not_touch_function_assignments() {
+        let src = "void f() { int x = 5;\nint longer_var = 6;\n}\n";
+        let out_default = fmt(src);
+        let out_aligned = fmt_with(src, &cfg_enum_align(1));
+        assert_eq!(
+            out_default, out_aligned,
+            "function assignments should not be aligned:\n{out_aligned}"
+        );
     }
 }

@@ -137,6 +137,9 @@ pub struct SpacingConfig {
     /// Align trailing `//` comments across consecutive lines that all carry a
     /// trailing comment.  0 = disabled; any positive value enables alignment.
     pub align_right_cmt_span: usize,
+    /// Align `=` signs across consecutive enum value lines.
+    /// 0 = disabled; any positive value enables alignment.
+    pub align_enum_equ_span: usize,
 }
 
 impl Default for SpacingConfig {
@@ -152,6 +155,7 @@ impl Default for SpacingConfig {
             pointer_align: PointerAlign::Middle,
             space_inside_angle_brackets: false,
             align_right_cmt_span: 0,
+            align_enum_equ_span: 0,
         }
     }
 }
@@ -236,6 +240,7 @@ space_after_cast           = false
 pointer_align              = "middle"
 space_inside_angle_brackets = false
 align_right_cmt_span       = 0
+align_enum_equ_span        = 0
 
 [newlines]
 style           = "lf"

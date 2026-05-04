@@ -2471,6 +2471,15 @@ mod tests {
     }
 
     #[test]
+    fn binary_op_after_inline_block_comment_gets_space() {
+        let out = fmt("int x = 2 /* comment */ + 3;\n");
+        assert!(
+            out.contains("/* comment */ +"),
+            "binary op after inline block comment must have a leading space, got:\n{out}"
+        );
+    }
+
+    #[test]
     fn block_comment_closing_already_spaced_unchanged() {
         let src = "/*\n * foo\n */\nvoid f() {}\n";
         let out = fmt(src);

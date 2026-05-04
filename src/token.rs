@@ -220,6 +220,7 @@ impl TokenKind {
                 | Self::RBracket
                 | Self::PlusPlus
                 | Self::MinusMinus
+                | Self::CommentBlock
         )
     }
 

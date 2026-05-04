@@ -1733,6 +1733,11 @@ pub fn format<'src>(tokens: &[Token<'src>], config: &Config) -> Result<String, F
     } else {
         output
     };
+    let output = if config.spacing.align_doxygen_cmt_span > 0 {
+        align_doxygen_comments(&output, nl)
+    } else {
+        output
+    };
     Ok(output)
 }
 
@@ -1860,6 +1865,68 @@ fn align_enum_equals(output: &str, nl: &str) -> String {
                     let rest = &lines[k][col..]; // starts with `= …`
                     let pad = target - name.len();
                     result[k] = format!("{}{}{}", name, " ".repeat(pad), rest);
+                }
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+
+    result.join(nl)
+}
+
+/// Returns the byte index of the `/**<` that starts a Doxygen member comment
+/// on `line`, or `None` if there is no such trailing comment.  Standalone
+/// comment lines (where `/**<` is the first non-whitespace) return `None`.
+fn trailing_doxygen_col(line: &str) -> Option<usize> {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() || trimmed.starts_with("/**<") {
+        return None;
+    }
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i + 3 < bytes.len() {
+        if bytes[i] == b'/' && bytes[i + 1] == b'*' && bytes[i + 2] == b'*' && bytes[i + 3] == b'<'
+        {
+            let before = &line[..i];
+            if before.bytes().any(|b| b != b' ' && b != b'\t') {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Align trailing `/**<` Doxygen member comments within groups of consecutive
+/// lines that all carry such a comment.  Each group aligns to the widest code
+/// column + 1 space.
+fn align_doxygen_comments(output: &str, nl: &str) -> String {
+    let lines: Vec<&str> = output.split(nl).collect();
+    let n = lines.len();
+    let cols: Vec<Option<usize>> = lines.iter().map(|l| trailing_doxygen_col(l)).collect();
+    let mut result: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+
+    let mut i = 0;
+    while i < n {
+        if cols[i].is_some() {
+            let mut j = i + 1;
+            while j < n && cols[j].is_some() {
+                j += 1;
+            }
+            if j > i + 1 {
+                let max_code_len = (i..j)
+                    .map(|k| lines[k][..cols[k].unwrap()].trim_end().len())
+                    .max()
+                    .unwrap();
+                let target = max_code_len + 1;
+                for k in i..j {
+                    let col = cols[k].unwrap();
+                    let code = lines[k][..col].trim_end();
+                    let comment = &lines[k][col..];
+                    let pad = target - code.len();
+                    result[k] = format!("{}{}{}", code, " ".repeat(pad), comment);
                 }
             }
             i = j;
@@ -2911,6 +2978,67 @@ mod tests {
         assert_eq!(
             out_default, out_aligned,
             "function assignments should not be aligned:\n{out_aligned}"
+        );
+    }
+
+    fn cfg_doxygen_align(span: usize) -> Config {
+        Config {
+            spacing: SpacingConfig {
+                align_doxygen_cmt_span: span,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn align_doxygen_comments_basic() {
+        let src = "typedef struct { int x; /**< x coord */\nconst char *name; /**< name */\n} S;\n";
+        let out = fmt_with(src, &cfg_doxygen_align(1));
+        let positions: Vec<usize> = out.lines().filter_map(trailing_doxygen_col).collect();
+        assert_eq!(
+            positions.len(),
+            2,
+            "expected 2 doxygen comments, got:\n{out}"
+        );
+        assert!(
+            positions.iter().all(|&c| c == positions[0]),
+            "/**< comments not aligned: columns={positions:?}\n{out}"
+        );
+    }
+
+    #[test]
+    fn align_doxygen_comments_off_by_default() {
+        let src = "typedef struct { int x; /**< x */\nconst char *name; /**< name */\n} S;\n";
+        let out = fmt(src);
+        let positions: Vec<usize> = out.lines().filter_map(trailing_doxygen_col).collect();
+        assert_eq!(
+            positions.len(),
+            2,
+            "expected 2 doxygen comments, got:\n{out}"
+        );
+        assert_ne!(
+            positions[0], positions[1],
+            "/**< should NOT be aligned when feature is off:\n{out}"
+        );
+    }
+
+    #[test]
+    fn align_doxygen_comments_standalone_not_treated_as_inline() {
+        // A /**< comment on its own line must not anchor a group.
+        let src =
+            "typedef struct {\n/**< standalone */\nint x; /**< inline */\nint yy; /**< inline2 */\n} S;\n";
+        let out = fmt_with(src, &cfg_doxygen_align(1));
+        let inline_positions: Vec<usize> = out.lines().filter_map(trailing_doxygen_col).collect();
+        // Only the two inline comments should appear; standalone returns None.
+        assert_eq!(
+            inline_positions.len(),
+            2,
+            "expected 2 inline doxygen comments, got:\n{out}"
+        );
+        assert_eq!(
+            inline_positions[0], inline_positions[1],
+            "two inline /**< comments must be aligned:\n{out}"
         );
     }
 }

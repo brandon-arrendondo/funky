@@ -151,6 +151,9 @@ pub struct SpacingConfig {
     /// Align `=` signs across consecutive enum value lines.
     /// 0 = disabled; any positive value enables alignment.
     pub align_enum_equ_span: usize,
+    /// Align trailing `/**<` Doxygen member comments across consecutive struct
+    /// member lines that all carry such a comment.  0 = disabled.
+    pub align_doxygen_cmt_span: usize,
 }
 
 impl Default for SpacingConfig {
@@ -167,6 +170,7 @@ impl Default for SpacingConfig {
             space_inside_angle_brackets: false,
             align_right_cmt_span: 0,
             align_enum_equ_span: 0,
+            align_doxygen_cmt_span: 0,
         }
     }
 }
@@ -254,6 +258,7 @@ pointer_align              = "middle"
 space_inside_angle_brackets = false
 align_right_cmt_span       = 0
 align_enum_equ_span        = 0
+align_doxygen_cmt_span     = 0
 
 [newlines]
 style           = "lf"

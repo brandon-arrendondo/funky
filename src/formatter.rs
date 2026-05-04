@@ -717,7 +717,7 @@ impl<'src> Fmt<'src> {
                 TokenKind::ColonColon => {
                     i += 1;
                 }
-                TokenKind::Whitespace | TokenKind::Newline => {
+                TokenKind::Whitespace | TokenKind::Newline | TokenKind::PreprocLine => {
                     i += 1;
                 }
                 _ => break,
@@ -729,7 +729,7 @@ impl<'src> Fmt<'src> {
         while i < self.tokens.len()
             && matches!(
                 self.tokens[i].kind,
-                TokenKind::Whitespace | TokenKind::Newline
+                TokenKind::Whitespace | TokenKind::Newline | TokenKind::PreprocLine
             )
         {
             i += 1;
@@ -1292,7 +1292,9 @@ impl<'src> Fmt<'src> {
                 }
                 TokenKind::RParen => {
                     self.flush_blank_lines();
-                    if self.config.spacing.space_inside_parens && !self.at_line_start {
+                    if self.at_line_start {
+                        self.align_to_paren();
+                    } else if self.config.spacing.space_inside_parens {
                         self.space();
                     }
                     self.write(")");

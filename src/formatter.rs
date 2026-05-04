@@ -3034,9 +3034,9 @@ mod tests {
     }
 
     #[test]
-    fn align_enum_equals_off_by_default() {
+    fn align_enum_equals_off_when_span_zero() {
         let src = "enum E { A = 1,\nLONG_NAME = 2,\n};\n";
-        let out = fmt(src);
+        let out = fmt_with(src, &cfg_enum_align(0));
         let positions: Vec<usize> = out.lines().filter_map(enum_eq_col).collect();
         assert_eq!(
             positions.len(),
@@ -3045,7 +3045,7 @@ mod tests {
         );
         assert_ne!(
             positions[0], positions[1],
-            "enum = should NOT be aligned when feature is off:\n{out}"
+            "enum = should NOT be aligned when span=0:\n{out}"
         );
     }
 
@@ -3120,9 +3120,9 @@ mod tests {
     }
 
     #[test]
-    fn align_doxygen_comments_off_by_default() {
+    fn align_doxygen_comments_off_when_span_zero() {
         let src = "typedef struct { int x; /**< x */\nconst char *name; /**< name */\n} S;\n";
-        let out = fmt(src);
+        let out = fmt_with(src, &cfg_doxygen_align(0));
         let positions: Vec<usize> = out.lines().filter_map(trailing_doxygen_col).collect();
         assert_eq!(
             positions.len(),
@@ -3131,7 +3131,7 @@ mod tests {
         );
         assert_ne!(
             positions[0], positions[1],
-            "/**< should NOT be aligned when feature is off:\n{out}"
+            "/**< should NOT be aligned when span=0:\n{out}"
         );
     }
 

@@ -22,11 +22,13 @@ space_inside_brackets      = false
 space_after_cast           = false
 pointer_align              = "name"    # "type" (int* p), "name" (int *p), "middle" (int * p)
 space_inside_angle_brackets = false    # false: vector<int>   true: vector< int >
+align_enum_equ_span        = 1        # 0: off; ≥1: align enum = signs within span
+align_doxygen_cmt_span     = 1        # 0: off; ≥1: column-align /**< member comments
 
 [newlines]
 style           = "lf"   # "lf", "crlf", "native"
 max_blank_lines = 2
 final_newline   = true
-blank_line_after_var_decl_block = false  # insert blank line after leading var decls in a function
+blank_line_after_var_decl_block = true   # insert blank line after leading var decls in a function
 blank_line_after_open_brace     = false  # insert blank line after { in function/block bodies
 merge_line_comment              = false  # hoist standalone // comment onto preceding {/}/; line

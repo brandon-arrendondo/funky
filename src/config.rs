@@ -169,8 +169,8 @@ impl Default for SpacingConfig {
             pointer_align: PointerAlign::Name,
             space_inside_angle_brackets: false,
             align_right_cmt_span: 0,
-            align_enum_equ_span: 0,
-            align_doxygen_cmt_span: 0,
+            align_enum_equ_span: 1,
+            align_doxygen_cmt_span: 1,
         }
     }
 }
@@ -267,14 +267,14 @@ space_after_cast           = false
 pointer_align              = "middle"
 space_inside_angle_brackets = false
 align_right_cmt_span       = 0
-align_enum_equ_span        = 0
-align_doxygen_cmt_span     = 0
+align_enum_equ_span        = 1
+align_doxygen_cmt_span     = 1
 
 [newlines]
 style           = "lf"
 max_blank_lines = 2
 final_newline   = true
-blank_line_after_var_decl_block = false
+blank_line_after_var_decl_block = true
 blank_line_after_open_brace     = false
 merge_line_comment              = false
 "#;

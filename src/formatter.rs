@@ -265,6 +265,42 @@ impl<'src> Fmt<'src> {
         )
     }
 
+    /// Emit the newline/space after a `}` based on what follows.
+    /// Called from both the RBrace arm and the LBrace empty-body collapse path.
+    fn emit_post_brace_spacing(
+        &mut self,
+        ctx: BraceCtx,
+        next_kind: Option<TokenKind>,
+        source_line: u32,
+    ) {
+        let semi_follows = next_kind == Some(TokenKind::Semi);
+        let typedef_name =
+            matches!(ctx, BraceCtx::Type) && matches!(next_kind, Some(TokenKind::Ident));
+        let cuddle = match next_kind {
+            Some(TokenKind::KwElse) => self.config.braces.cuddle_else,
+            Some(TokenKind::KwCatch) => self.config.braces.cuddle_catch,
+            Some(TokenKind::KwWhile) => matches!(ctx, BraceCtx::Block),
+            _ => false,
+        };
+
+        if semi_follows {
+            // `;` will be written by the Semi arm directly.
+        } else if typedef_name || (cuddle && matches!(self.config.braces.style, BraceStyle::Kr)) {
+            self.space();
+        } else if cuddle
+            && matches!(self.config.braces.style, BraceStyle::Stroustrup)
+            && next_kind == Some(TokenKind::KwElse)
+        {
+            self.nl();
+            self.skip_next_newline = true;
+        } else if self.peek_inline_comment(source_line) {
+            // inline comment — let CommentLine close the line
+        } else {
+            self.nl();
+            self.skip_next_newline = true;
+        }
+    }
+
     /// Called once per token, before the token is written, to advance the
     /// blank_line_after_var_decl_block state machine.
     fn check_var_decl_transition(&mut self, kind: TokenKind) {
@@ -315,25 +351,12 @@ impl<'src> Fmt<'src> {
         };
         i = skip_ws(i);
 
-        // Optional leading qualifiers / elaborated-type keywords (may repeat)
-        let is_type_lead = |k: TokenKind| {
-            matches!(
-                k,
-                TokenKind::Keyword
-                    | TokenKind::KwStruct
-                    | TokenKind::KwClass
-                    | TokenKind::KwUnion
-                    | TokenKind::KwEnum
-                    | TokenKind::KwTypename
-            )
-        };
-
         // Accept any number of qualifier/struct/class/… keywords before the
         // core type name — but we need at least one type-like token overall.
         let mut saw_type = false;
         while i < self.tokens.len() {
             let k = self.tokens[i].kind;
-            if is_type_lead(k) {
+            if Self::is_decl_start(k) {
                 saw_type = true;
                 i += 1;
                 i = skip_ws(i);
@@ -1017,34 +1040,7 @@ impl<'src> Fmt<'src> {
                             }
                             let next_kind = self.tokens.get(after).map(|t| t.kind);
 
-                            let semi_follows = next_kind == Some(TokenKind::Semi);
-                            let typedef_name = matches!(ctx, BraceCtx::Type)
-                                && matches!(next_kind, Some(TokenKind::Ident));
-                            let cuddle = match next_kind {
-                                Some(TokenKind::KwElse) => self.config.braces.cuddle_else,
-                                Some(TokenKind::KwCatch) => self.config.braces.cuddle_catch,
-                                Some(TokenKind::KwWhile) => matches!(ctx, BraceCtx::Block),
-                                _ => false,
-                            };
-
-                            if semi_follows {
-                                // `;` will be written by the Semi arm directly.
-                            } else if typedef_name
-                                || (cuddle && matches!(self.config.braces.style, BraceStyle::Kr))
-                            {
-                                self.space();
-                            } else if cuddle
-                                && matches!(self.config.braces.style, BraceStyle::Stroustrup)
-                                && next_kind == Some(TokenKind::KwElse)
-                            {
-                                self.nl();
-                                self.skip_next_newline = true;
-                            } else if self.peek_inline_comment(tok.span.line) {
-                                // inline comment — let CommentLine close the line
-                            } else {
-                                self.nl();
-                                self.skip_next_newline = true;
-                            }
+                            self.emit_post_brace_spacing(ctx, next_kind, tok.span.line);
 
                             self.pending_switch = false;
                             self.pending_type = false;
@@ -1126,39 +1122,7 @@ impl<'src> Fmt<'src> {
                         // decl without one, which is fine). Just emit the brace.
                     }
 
-                    // `typedef struct { … } Name;` — name stays on same line as `}`.
-                    let typedef_name = matches!(ctx, BraceCtx::Type)
-                        && matches!(next_kind, Some(TokenKind::Ident));
-
-                    // `struct Foo { … };` / `};` — semicolon stays on same line as `}`.
-                    let semi_follows = next_kind == Some(TokenKind::Semi);
-
-                    // Cuddle else/catch/while (do-while)?
-                    let cuddle = match next_kind {
-                        Some(TokenKind::KwElse) => self.config.braces.cuddle_else,
-                        Some(TokenKind::KwCatch) => self.config.braces.cuddle_catch,
-                        Some(TokenKind::KwWhile) => matches!(ctx, BraceCtx::Block),
-                        _ => false,
-                    };
-
-                    if semi_follows {
-                        // `;` needs no space and is written by the Semi arm directly.
-                    } else if typedef_name
-                        || (cuddle && matches!(self.config.braces.style, BraceStyle::Kr))
-                    {
-                        self.space();
-                    } else if cuddle
-                        && matches!(self.config.braces.style, BraceStyle::Stroustrup)
-                        && next_kind == Some(TokenKind::KwElse)
-                    {
-                        self.nl();
-                        self.skip_next_newline = true;
-                    } else if self.peek_inline_comment(tok.span.line) {
-                        // trailing inline comment on same line — let CommentLine close it
-                    } else {
-                        self.nl();
-                        self.skip_next_newline = true;
-                    }
+                    self.emit_post_brace_spacing(ctx, next_kind, tok.span.line);
 
                     self.set_prev(TokenKind::RBrace);
                 }
@@ -1384,29 +1348,10 @@ impl<'src> Fmt<'src> {
                     self.set_prev(tok.kind);
                 }
 
-                // ── Unary / binary * and & (non-declarator context) ──────────
-                // In unary context (prev does not end an expression), suppress
-                // the space after the operator so `*ptr` and `&x` are not
-                // mangled into `* ptr` / `& x`.
-                TokenKind::Star | TokenKind::Amp => {
-                    self.flush_blank_lines();
-                    let is_binary = self.prev.is_some_and(|p| p.ends_expr());
-                    if self.at_line_start {
-                        self.indent();
-                    } else if self.needs_space(tok.kind) {
-                        self.space();
-                    }
-                    if !is_binary {
-                        self.suppress_next_space = true;
-                    }
-                    self.write(tok.lexeme);
-                    self.set_prev(tok.kind);
-                }
-
-                // ── Unary / binary + and - ────────────────────────────────────
-                // Mirror the Star/Amp arm: suppress space after the operator when
-                // it is used as a unary prefix so `-1` and `+x` stay compact.
-                TokenKind::Plus | TokenKind::Minus => {
+                // ── Unary / binary * & + - (non-declarator) ─────────────────
+                // In unary context, suppress the space after the op so `*ptr`,
+                // `&x`, `-1`, `+x` stay compact.
+                TokenKind::Star | TokenKind::Amp | TokenKind::Plus | TokenKind::Minus => {
                     self.flush_blank_lines();
                     let is_binary = self.prev.is_some_and(|p| p.ends_expr());
                     if self.at_line_start {

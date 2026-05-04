@@ -461,6 +461,18 @@ impl<'src> Fmt<'src> {
         )
     }
 
+    /// True when the next non-whitespace token is a `CommentLine` on `source_line`.
+    fn peek_inline_line_comment(&self, source_line: u32) -> bool {
+        let mut i = self.pos;
+        while i < self.tokens.len() && self.tokens[i].kind == TokenKind::Whitespace {
+            i += 1;
+        }
+        matches!(
+            self.tokens.get(i),
+            Some(t) if t.kind == TokenKind::CommentLine && t.span.line == source_line
+        )
+    }
+
     // ── Small initializer detection ───────────────────────────────────────────
 
     /// Scans forward from `self.pos` (the token immediately after `{`) looking
@@ -1659,8 +1671,14 @@ impl<'src> Fmt<'src> {
                     }
                     self.write(",");
                     if self.large_init_stack.last() == Some(&true) && self.paren_depth == 0 {
-                        self.nl();
-                        self.skip_next_newline = true;
+                        // If a trailing line comment follows on the same source line,
+                        // let the CommentLine handler close the line instead.
+                        if self.peek_inline_line_comment(tok.span.line) {
+                            // nothing — CommentLine will emit the trailing \n
+                        } else {
+                            self.nl();
+                            self.skip_next_newline = true;
+                        }
                     }
                     self.set_prev(TokenKind::Comma);
                 }
@@ -2014,6 +2032,20 @@ mod tests {
         assert!(
             !out.contains("0,\n"),
             "expand_large_initializers=false should keep inline, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn large_initializer_inline_comment_stays_on_same_line() {
+        let src = "int a[9] = {0, // zero\n1, // one\n2, 3, 4, 5, 6, 7, 8};\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("0, // zero\n"),
+            "inline comment after element must stay on same line, got:\n{out}"
+        );
+        assert!(
+            out.contains("1, // one\n"),
+            "inline comment after second element must stay on same line, got:\n{out}"
         );
     }
 

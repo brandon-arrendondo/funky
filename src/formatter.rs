@@ -39,11 +39,20 @@ struct Fmt<'src> {
     prev: Option<TokenKind>,
     /// Number of switch bodies we are currently inside — used to dedent case/default.
     switch_depth: u32,
+    /// Number of class/struct/union bodies we are currently inside — used to dedent access specifiers.
+    class_depth: u32,
     /// Set when `switch` keyword is emitted; cleared once its `{` is consumed.
     pending_switch: bool,
+    /// Set when a type keyword (class/struct/union/enum) is emitted; cleared
+    /// once its `{` is consumed. Needed because the `{` is often preceded by
+    /// the type's name (an Ident), not the keyword itself.
+    pending_type: bool,
     /// Set when `case`/`default` keyword is emitted so the following `:` gets
     /// a newline after it instead of continuing on the same line.
     in_case_label: bool,
+    /// Set when `public`/`private`/`protected` is emitted so the following `:`
+    /// gets a newline after it.
+    in_access_label: bool,
     /// When true, the next call to `space()` is suppressed and the flag is
     /// cleared. Used to suppress the space between a pointer `*`/`&` and the
     /// following identifier in `name` pointer-alignment mode.
@@ -72,8 +81,11 @@ impl<'src> Fmt<'src> {
             skip_next_newline: false,
             prev: None,
             switch_depth: 0,
+            class_depth: 0,
             pending_switch: false,
+            pending_type: false,
             in_case_label: false,
+            in_access_label: false,
             suppress_next_space: false,
             template_depth: 0,
             last_was_template_close: false,
@@ -212,9 +224,22 @@ impl<'src> Fmt<'src> {
                 }
             }
             TokenKind::KwElse | TokenKind::KwDo | TokenKind::KwTry => BraceCtx::Block,
-            TokenKind::Ident => {
-                // Likely a function definition body.
-                BraceCtx::Function
+            TokenKind::Ident | TokenKind::Gt => {
+                // Ident: could be a named type `class Foo {` or a function body.
+                // Gt: template specialization `class Foo<T> {`.
+                if self.pending_type {
+                    BraceCtx::Type
+                } else {
+                    BraceCtx::Function
+                }
+            }
+            TokenKind::Colon => {
+                // `class Foo : public Bar {` — colon ends the base-class list.
+                if self.pending_type {
+                    BraceCtx::Type
+                } else {
+                    BraceCtx::Other
+                }
             }
             // After `=`, `(`, `,`, `{` → initializer-list style
             TokenKind::Eq
@@ -223,8 +248,7 @@ impl<'src> Fmt<'src> {
             | TokenKind::LParen
             | TokenKind::LBracket
             | TokenKind::LBrace
-            | TokenKind::Comma
-            | TokenKind::Colon => BraceCtx::Other,
+            | TokenKind::Comma => BraceCtx::Other,
             _ => BraceCtx::Other,
         }
     }
@@ -572,7 +596,11 @@ impl<'src> Fmt<'src> {
                     if ctx == BraceCtx::Switch {
                         self.switch_depth += 1;
                     }
+                    if ctx == BraceCtx::Type {
+                        self.class_depth += 1;
+                    }
                     self.pending_switch = false;
+                    self.pending_type = false;
                     self.brace_stack.push(ctx);
                     self.indent_level += 1;
                     self.nl();
@@ -595,6 +623,9 @@ impl<'src> Fmt<'src> {
 
                     if ctx == BraceCtx::Switch {
                         self.switch_depth = self.switch_depth.saturating_sub(1);
+                    }
+                    if ctx == BraceCtx::Type {
+                        self.class_depth = self.class_depth.saturating_sub(1);
                     }
 
                     // Semicolon required after type definitions and namespace
@@ -653,6 +684,7 @@ impl<'src> Fmt<'src> {
                 // ── Semicolon ─────────────────────────────────────────────────
                 TokenKind::Semi => {
                     self.flush_blank_lines();
+                    self.pending_type = false;
                     self.write(";");
                     // Don't emit newline if we're inside parens (for-loop header).
                     if self.paren_depth == 0 {
@@ -705,12 +737,16 @@ impl<'src> Fmt<'src> {
                     self.set_prev(TokenKind::RBracket);
                 }
 
-                // ── Colon after case / default ────────────────────────────────
+                // ── Colon after case / default / access specifier ─────────────
                 TokenKind::Colon => {
                     self.flush_blank_lines();
                     self.write(":");
                     if self.in_case_label {
                         self.in_case_label = false;
+                        self.nl();
+                        self.skip_next_newline = true;
+                    } else if self.in_access_label {
+                        self.in_access_label = false;
                         self.nl();
                         self.skip_next_newline = true;
                     }
@@ -745,6 +781,24 @@ impl<'src> Fmt<'src> {
                         self.space();
                     }
                     self.in_case_label = true;
+                    self.write(tok.lexeme);
+                    self.set_prev(tok.kind);
+                }
+
+                // ── Access specifiers — dedented to class body level ──────────
+                TokenKind::KwPublic | TokenKind::KwPrivate | TokenKind::KwProtected => {
+                    self.flush_blank_lines();
+                    if self.at_line_start && self.class_depth > 0 {
+                        let saved = self.indent_level;
+                        if self.indent_level > 0 {
+                            self.indent_level -= 1;
+                        }
+                        self.indent();
+                        self.indent_level = saved;
+                        self.in_access_label = true;
+                    } else if !self.at_line_start && self.needs_space(tok.kind) {
+                        self.space();
+                    }
                     self.write(tok.lexeme);
                     self.set_prev(tok.kind);
                 }
@@ -827,6 +881,22 @@ impl<'src> Fmt<'src> {
                             self.suppress_next_space = true;
                         }
                     }
+                    self.write(tok.lexeme);
+                    self.set_prev(tok.kind);
+                }
+
+                // ── Type keywords — mark pending_type for brace context ──────
+                TokenKind::KwClass
+                | TokenKind::KwStruct
+                | TokenKind::KwUnion
+                | TokenKind::KwEnum => {
+                    self.flush_blank_lines();
+                    if self.at_line_start {
+                        self.indent();
+                    } else if self.needs_space(tok.kind) {
+                        self.space();
+                    }
+                    self.pending_type = true;
                     self.write(tok.lexeme);
                     self.set_prev(tok.kind);
                 }
@@ -1180,5 +1250,41 @@ mod tests {
             .filter(|w| w[0].is_empty() && w[1].is_empty() && w[2].is_empty())
             .count();
         assert_eq!(blanks, 0, "too many consecutive blank lines:\n{out}");
+    }
+
+    #[test]
+    fn access_specifier_indentation() {
+        let src = "class Foo{public:int x;private:int y;protected:int z;};";
+        let out = fmt(src);
+        // public/private/protected must be at class brace level (4 spaces), not member level (8).
+        assert!(
+            out.lines().any(|l| l == "public:"),
+            "public: not at class indent level:\n{out}"
+        );
+        assert!(
+            out.lines().any(|l| l == "private:"),
+            "private: not at class indent level:\n{out}"
+        );
+        assert!(
+            out.lines().any(|l| l == "protected:"),
+            "protected: not at class indent level:\n{out}"
+        );
+        // Members must be indented one level deeper than the access specifier.
+        assert!(
+            out.lines().any(|l| l == "    int x;"),
+            "member not indented past access specifier:\n{out}"
+        );
+    }
+
+    #[test]
+    fn access_specifier_in_inheritance_not_dedented() {
+        // `public` in base-class list must not be treated as an access specifier label.
+        let src = "class Bar {};\nclass Foo : public Bar {};\n";
+        let out = fmt(src);
+        // The line containing 'public Bar' must not be just "public" at column 0.
+        assert!(
+            !out.lines().any(|l| l.trim() == "public:"),
+            "inheritance public wrongly treated as label:\n{out}"
+        );
     }
 }

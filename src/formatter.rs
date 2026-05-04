@@ -989,6 +989,9 @@ impl<'src> Fmt<'src> {
                     let typedef_name = matches!(ctx, BraceCtx::Type)
                         && matches!(next_kind, Some(TokenKind::Ident));
 
+                    // `struct Foo { … };` / `};` — semicolon stays on same line as `}`.
+                    let semi_follows = next_kind == Some(TokenKind::Semi);
+
                     // Cuddle else/catch/while (do-while)?
                     let cuddle = match next_kind {
                         Some(TokenKind::KwElse) => self.config.braces.cuddle_else,
@@ -997,7 +1000,9 @@ impl<'src> Fmt<'src> {
                         _ => false,
                     };
 
-                    if typedef_name
+                    if semi_follows {
+                        // `;` needs no space and is written by the Semi arm directly.
+                    } else if typedef_name
                         || (cuddle && matches!(self.config.braces.style, BraceStyle::Kr))
                     {
                         self.space();
@@ -1848,6 +1853,21 @@ mod tests {
         assert!(
             out.contains("sizeof(int)"),
             "sizeof should not get space before paren: {out}"
+        );
+    }
+
+    #[test]
+    fn struct_closing_brace_semicolon_same_line() {
+        // `struct Foo { … };` must not put `;` on its own line.
+        let src = "struct Point { int x; int y; };\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("};\n"),
+            "semicolon must follow closing brace on same line: {out}"
+        );
+        assert!(
+            !out.contains("}\n;"),
+            "semicolon must not be on its own line: {out}"
         );
     }
 

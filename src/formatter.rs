@@ -508,9 +508,10 @@ impl<'src> Fmt<'src> {
         let mut count = 0;
         for (offset, tk) in self.tokens[self.pos..].iter().enumerate() {
             match tk.kind {
-                TokenKind::LBrace => return None,
+                // Nested brace or source newline: not a small single-line init.
+                TokenKind::LBrace | TokenKind::Newline => return None,
                 TokenKind::RBrace => return Some(self.pos + offset),
-                TokenKind::Whitespace | TokenKind::Newline => {}
+                TokenKind::Whitespace => {}
                 _ => {
                     count += 1;
                     if count > MAX_TOKENS {
@@ -2163,6 +2164,22 @@ mod tests {
         assert!(
             out.trim_end().ends_with("= { 1, 2, 3 };"),
             "expected inline initializer, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn multiline_initializer_not_collapsed_to_one_line() {
+        // A multi-line initializer in the source must not be collapsed even if
+        // the total element count is below the small-init threshold.
+        let src = "uint8_t buf[] = {\n    0x30,\n    0x06,\n    0x00, 0x04,\n    'a', 'b', 'c', 'd'\n};\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("{\n"),
+            "multi-line initializer must stay multi-line, got:\n{out}"
+        );
+        assert!(
+            !out.contains("= { 0x30,"),
+            "multi-line initializer must not be collapsed to one line, got:\n{out}"
         );
     }
 

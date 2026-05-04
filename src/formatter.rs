@@ -389,6 +389,24 @@ impl<'src> Fmt<'src> {
 
     // ── Inline-comment detection ──────────────────────────────────────────────
 
+    /// True if the next non-whitespace token is `*` or `&` — signals a
+    /// function-pointer declarator `(*fn)` rather than a call expression.
+    fn next_is_ptr_or_ref(&self) -> bool {
+        let mut i = self.pos;
+        while i < self.tokens.len()
+            && matches!(
+                self.tokens[i].kind,
+                TokenKind::Whitespace | TokenKind::Newline
+            )
+        {
+            i += 1;
+        }
+        matches!(
+            self.tokens.get(i).map(|t| t.kind),
+            Some(TokenKind::Star | TokenKind::Amp)
+        )
+    }
+
     /// True if the next token (skipping only `Whitespace`, not `Newline`) is a
     /// `CommentLine` or `CommentBlock` whose source line matches `source_line`.
     fn peek_inline_comment(&self, source_line: u32) -> bool {
@@ -1168,6 +1186,14 @@ impl<'src> Fmt<'src> {
                     if self.at_line_start {
                         self.indent();
                     } else if self.needs_space(TokenKind::LParen) {
+                        self.space();
+                    } else if self.next_is_ptr_or_ref()
+                        && matches!(
+                            self.prev,
+                            Some(TokenKind::Keyword | TokenKind::Ident | TokenKind::RParen)
+                        )
+                    {
+                        // function-pointer declarator: `void (*Fn)(...)` needs space before `(`
                         self.space();
                     }
                     self.write("(");
@@ -2144,6 +2170,33 @@ mod tests {
         assert!(
             !out.contains(";++i") && out.contains("; ++i"),
             "semicolon before ++ must have a space: {out}"
+        );
+    }
+
+    #[test]
+    fn func_ptr_typedef_space_before_paren() {
+        let out = fmt("typedef void(*Fn)(int);\n");
+        assert!(
+            out.contains("void (*Fn)"),
+            "function pointer typedef needs space before (*: {out}"
+        );
+    }
+
+    #[test]
+    fn func_ptr_typedef_ref_space_before_paren() {
+        let out = fmt("typedef void(&Ref)(int);\n");
+        assert!(
+            out.contains("void (&Ref)"),
+            "function reference typedef needs space before (&: {out}"
+        );
+    }
+
+    #[test]
+    fn func_ptr_call_no_extra_space() {
+        let out = fmt("void f() { bar(x); }\n");
+        assert!(
+            out.contains("bar(x)"),
+            "normal call must not gain extra space: {out}"
         );
     }
 

@@ -755,7 +755,12 @@ impl<'src> Fmt<'src> {
             if prev.ends_expr() {
                 return self.config.spacing.space_around_binary_ops;
             }
-            // unary context — no space between operator and operand
+            // next is in unary context, but prev (a binary op or keyword like
+            // `return`/`throw`) still needs a trailing space: `= -1`, `return &x`.
+            if prev.is_binary_op() || prev.is_any_kw() {
+                return self.config.spacing.space_around_binary_ops;
+            }
+            // purely unary context (e.g. after `(`) — no space
             return false;
         }
         if prev.is_binary_op() {
@@ -1231,6 +1236,24 @@ impl<'src> Fmt<'src> {
                 // the space after the operator so `*ptr` and `&x` are not
                 // mangled into `* ptr` / `& x`.
                 TokenKind::Star | TokenKind::Amp => {
+                    self.flush_blank_lines();
+                    let is_binary = self.prev.is_some_and(|p| p.ends_expr());
+                    if self.at_line_start {
+                        self.indent();
+                    } else if self.needs_space(tok.kind) {
+                        self.space();
+                    }
+                    if !is_binary {
+                        self.suppress_next_space = true;
+                    }
+                    self.write(tok.lexeme);
+                    self.set_prev(tok.kind);
+                }
+
+                // ── Unary / binary + and - ────────────────────────────────────
+                // Mirror the Star/Amp arm: suppress space after the operator when
+                // it is used as a unary prefix so `-1` and `+x` stay compact.
+                TokenKind::Plus | TokenKind::Minus => {
                     self.flush_blank_lines();
                     let is_binary = self.prev.is_some_and(|p| p.ends_expr());
                     if self.at_line_start {
@@ -1794,6 +1817,28 @@ mod tests {
             out.contains("(MyType*)val") || out.contains("(MyType *)val"),
             "user-defined pointer cast should have no space after ')': {out}"
         );
+    }
+
+    #[test]
+    fn unary_after_assignment_space() {
+        // = &ptr, = -1, = *ptr, = +val must preserve space after `=`.
+        let src = "void f() { int a = &ptr; int b = -1; int c = *ptr; int d = +val; }\n";
+        let out = fmt(src);
+        assert!(out.contains("= &ptr"), "= &ptr: {out}");
+        assert!(out.contains("= -1"), "= -1: {out}");
+        assert!(out.contains("= *ptr"), "= *ptr: {out}");
+        assert!(out.contains("= +val"), "= +val: {out}");
+    }
+
+    #[test]
+    fn unary_no_space_after_op() {
+        // Unary -/+/*/& must not gain a space between op and operand.
+        let src = "void f() { return -1; return *ptr; return &x; int z = x + -y; }\n";
+        let out = fmt(src);
+        assert!(out.contains("return -1"), "return -1: {out}");
+        assert!(out.contains("return *ptr"), "return *ptr: {out}");
+        assert!(out.contains("return &x"), "return &x: {out}");
+        assert!(out.contains("+ -y"), "x + -y: {out}");
     }
 
     #[test]

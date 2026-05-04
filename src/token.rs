@@ -212,7 +212,6 @@ impl TokenKind {
             self,
             Self::Ident
                 | Self::Keyword
-                | Self::KwReturn // not really but avoids false positive
                 | Self::LitInt
                 | Self::LitFloat
                 | Self::LitStr

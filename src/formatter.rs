@@ -1838,7 +1838,25 @@ fn enum_eq_col(line: &str) -> Option<usize> {
     None
 }
 
+/// True when `line` looks like a bare enum member with no explicit value
+/// (e.g. `    RED,` or `    RED, // comment`).  Used to let bare members
+/// act as transparent connectors within an alignment group so that
+/// `RED, GREEN = 5, BLUE, YELLOW = 10` all align their `=` signs together.
+fn is_bare_enum_member(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with(|c: char| c.is_alphabetic() || c == '_') {
+        return false;
+    }
+    if !trimmed.contains(',') {
+        return false;
+    }
+    // No bare `=` — those are captured by enum_eq_col instead.
+    !trimmed.contains('=')
+}
+
 /// Align `=` signs within groups of consecutive enum value lines.
+/// Bare enum members (no explicit value) are transparent within a group —
+/// they don't break alignment but are left unchanged themselves.
 fn align_enum_equals(output: &str, nl: &str) -> String {
     let lines: Vec<&str> = output.split(nl).collect();
     let n = lines.len();
@@ -1848,18 +1866,21 @@ fn align_enum_equals(output: &str, nl: &str) -> String {
     let mut i = 0;
     while i < n {
         if cols[i].is_some() {
+            // Extend the group through bare members as well as `=` members.
             let mut j = i + 1;
-            while j < n && cols[j].is_some() {
+            while j < n && (cols[j].is_some() || is_bare_enum_member(lines[j])) {
                 j += 1;
             }
-            if j > i + 1 {
-                // Widest name (trimmed) determines the target column.
-                let max_name_len = (i..j)
-                    .map(|k| lines[k][..cols[k].unwrap()].trim_end().len())
+            // Collect indices of only the `=`-bearing lines in this group.
+            let eq_indices: Vec<usize> = (i..j).filter(|&k| cols[k].is_some()).collect();
+            if eq_indices.len() > 1 {
+                let max_name_len = eq_indices
+                    .iter()
+                    .map(|&k| lines[k][..cols[k].unwrap()].trim_end().len())
                     .max()
                     .unwrap();
                 let target = max_name_len + 1;
-                for k in i..j {
+                for k in eq_indices {
                     let col = cols[k].unwrap();
                     let name = lines[k][..col].trim_end();
                     let rest = &lines[k][col..]; // starts with `= …`
@@ -2978,6 +2999,23 @@ mod tests {
         assert_eq!(
             out_default, out_aligned,
             "function assignments should not be aligned:\n{out_aligned}"
+        );
+    }
+
+    #[test]
+    fn align_enum_equals_bare_members_transparent() {
+        // Bare members (no explicit value) must not break the alignment group.
+        let src = "enum E { RED,\nGREEN = 5,\nBLUE,\nYELLOW = 10,\nWHITE,\n};\n";
+        let out = fmt_with(src, &cfg_enum_align(1));
+        let positions: Vec<usize> = out.lines().filter_map(enum_eq_col).collect();
+        assert_eq!(
+            positions.len(),
+            2,
+            "expected 2 assigned members, got:\n{out}"
+        );
+        assert_eq!(
+            positions[0], positions[1],
+            "= signs not aligned across bare members:\n{out}"
         );
     }
 

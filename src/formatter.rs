@@ -753,6 +753,12 @@ impl<'src> Fmt<'src> {
             if next == TokenKind::RBrace {
                 return false; // newline handled by the RBrace arm
             }
+            // After `;` in a for-loop header (e.g. `; ++i`), space is required.
+            if matches!(next, TokenKind::PlusPlus | TokenKind::MinusMinus)
+                && prev == TokenKind::Semi
+            {
+                return true;
+            }
             return false;
         }
 
@@ -2129,6 +2135,24 @@ mod tests {
         assert!(
             out.contains("bar(x,\n            y)"),
             "nested paren continuation should align to inner opening paren, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn space_after_semi_before_plusplus_in_for() {
+        let out = fmt("void f() { for (i = 0; i < 10;++i) {} }\n");
+        assert!(
+            !out.contains(";++i") && out.contains("; ++i"),
+            "semicolon before ++ must have a space: {out}"
+        );
+    }
+
+    #[test]
+    fn space_after_semi_before_minusminus_in_for() {
+        let out = fmt("void f() { for (i = 10; i > 0;--i) {} }\n");
+        assert!(
+            !out.contains(";--i") && out.contains("; --i"),
+            "semicolon before -- must have a space: {out}"
         );
     }
 }

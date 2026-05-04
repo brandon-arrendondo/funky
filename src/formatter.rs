@@ -81,6 +81,10 @@ struct Fmt<'src> {
     /// Stack parallel to paren_depth: the column to align continuation lines
     /// to (i.e. the column right after the `(` was written).
     paren_col_stack: Vec<usize>,
+    /// Parallel to paren_col_stack: true when the `(` was the last
+    /// non-whitespace on its line, meaning continuations use a regular indent
+    /// instead of column alignment.
+    paren_eol_stack: Vec<bool>,
 
     // ── blank_line_after_var_decl_block state ─────────────────────────────────
     /// True while we are in the leading declaration run of a function body.
@@ -127,6 +131,7 @@ impl<'src> Fmt<'src> {
             last_was_cast_close: false,
             current_col: 0,
             paren_col_stack: Vec::new(),
+            paren_eol_stack: Vec::new(),
             in_var_decl_block: false,
             at_func_stmt_start: false,
             saw_func_decl: false,
@@ -206,6 +211,25 @@ impl<'src> Fmt<'src> {
     }
 
     fn align_to_paren(&mut self) {
+        // When `(` was the last non-whitespace before the newline, aligning to
+        // its column would push continuation far right. Use a normal indent
+        // (one level deeper than the current scope) instead.  We detect this
+        // lazily on the first continuation line and record it in paren_eol_stack
+        // so all subsequent lines in the same paren level behave consistently.
+        if let Some(eol) = self.paren_eol_stack.last_mut() {
+            if !*eol && self.output.trim_end().ends_with('(') {
+                *eol = true;
+            }
+            if *eol {
+                let unit = self.config.indent_str();
+                for _ in 0..=self.indent_level {
+                    self.output.push_str(&unit);
+                    self.current_col += unit.len();
+                }
+                self.at_line_start = false;
+                return;
+            }
+        }
         if let Some(&col) = self.paren_col_stack.last() {
             for _ in 0..col {
                 self.output.push(' ');
@@ -1442,6 +1466,7 @@ impl<'src> Fmt<'src> {
                     self.write("(");
                     self.paren_depth += 1;
                     self.paren_col_stack.push(self.current_col);
+                    self.paren_eol_stack.push(false);
                     self.set_prev(TokenKind::LParen);
                 }
                 TokenKind::RParen => {
@@ -1454,6 +1479,7 @@ impl<'src> Fmt<'src> {
                     self.write(")");
                     self.paren_depth = self.paren_depth.saturating_sub(1);
                     self.paren_col_stack.pop();
+                    self.paren_eol_stack.pop();
                     let is_cast_close = self.cast_paren_stack.pop().unwrap_or(false);
                     self.prev = Some(TokenKind::RParen);
                     self.last_was_template_close = false;
@@ -2798,6 +2824,36 @@ mod tests {
         assert!(
             out.contains("bar(x,\n            y)"),
             "nested paren continuation should align to inner opening paren, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn paren_eol_continuation_uses_regular_indent() {
+        // When `(` is the last token on a line, continuation lines must use
+        // a normal block indent rather than aligning to the (deep) paren column.
+        let src = "result = some_function(\narg1,\narg2,\narg3);\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("some_function(\n    arg1,\n    arg2,\n    arg3)"),
+            "paren-at-eol continuation must use regular indent, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn paren_eol_continuation_consistent_across_lines() {
+        // All continuation lines in an eol-paren must share the same indent,
+        // not just the first one.
+        let src = "void f() { foo(\narg1,\narg2,\narg3); }\n";
+        let out = fmt(src);
+        let cont_lines: Vec<&str> = out.lines().filter(|l| l.contains("arg")).collect();
+        assert_eq!(cont_lines.len(), 3, "expected 3 arg lines, got:\n{out}");
+        let indents: Vec<usize> = cont_lines
+            .iter()
+            .map(|l| l.len() - l.trim_start().len())
+            .collect();
+        assert!(
+            indents.iter().all(|&i| i == indents[0]),
+            "all continuation lines must have same indent, got:\n{out}"
         );
     }
 

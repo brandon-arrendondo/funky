@@ -389,22 +389,41 @@ impl<'src> Fmt<'src> {
 
     // ── Inline-comment detection ──────────────────────────────────────────────
 
-    /// True if the next non-whitespace token is `*` or `&` — signals a
-    /// function-pointer declarator `(*fn)` rather than a call expression.
-    fn next_is_ptr_or_ref(&self) -> bool {
-        let mut i = self.pos;
-        while i < self.tokens.len()
-            && matches!(
-                self.tokens[i].kind,
-                TokenKind::Whitespace | TokenKind::Newline
-            )
-        {
-            i += 1;
-        }
-        matches!(
+    /// True if the tokens from `self.pos` match the function-pointer declarator
+    /// pattern `(*Name)` or `(&Name)` — i.e. `*`/`&` then an identifier then `)`.
+    ///
+    /// This distinguishes `void (*Fn)(int)` from `memset(&data, 0, n)` where the
+    /// `(` is merely followed by an address-of expression, not a declarator.
+    fn next_is_fn_ptr_declarator(&self) -> bool {
+        let skip_ws = |mut j: usize| -> usize {
+            while j < self.tokens.len()
+                && matches!(
+                    self.tokens[j].kind,
+                    TokenKind::Whitespace | TokenKind::Newline
+                )
+            {
+                j += 1;
+            }
+            j
+        };
+        let mut i = skip_ws(self.pos);
+        // Must start with * or &
+        if !matches!(
             self.tokens.get(i).map(|t| t.kind),
             Some(TokenKind::Star | TokenKind::Amp)
-        )
+        ) {
+            return false;
+        }
+        i += 1;
+        i = skip_ws(i);
+        // Then an identifier (the function-pointer name)
+        if !matches!(self.tokens.get(i).map(|t| t.kind), Some(TokenKind::Ident)) {
+            return false;
+        }
+        i += 1;
+        i = skip_ws(i);
+        // Then immediately `)`
+        matches!(self.tokens.get(i).map(|t| t.kind), Some(TokenKind::RParen))
     }
 
     /// True if the next token (skipping only `Whitespace`, not `Newline`) is a
@@ -515,11 +534,16 @@ impl<'src> Fmt<'src> {
                     | TokenKind::KwTypename
                     | TokenKind::Star
                     | TokenKind::Amp
-                    | TokenKind::RParen
                     | TokenKind::Gt
             )
         ) {
             return true;
+        }
+        // `)` followed by `*`/`&` is a pointer declarator only when the `)`
+        // closed a cast paren — e.g. `(int) *p` dereference vs `(cast*) name`.
+        // Plain expression parens `(expr) * value` are multiplication.
+        if self.prev == Some(TokenKind::RParen) {
+            return self.last_was_cast_close;
         }
         // An identifier (user-defined type) followed by `*`/`&` is a pointer
         // declarator only when the tokens after the operator look like a name,
@@ -586,8 +610,67 @@ impl<'src> Fmt<'src> {
                     | TokenKind::AmpAmp
                     | TokenKind::PipePipe
                     | TokenKind::Question
+                    | TokenKind::PlusEq   // compound assignments
+                    | TokenKind::MinusEq
+                    | TokenKind::StarEq
+                    | TokenKind::SlashEq
+                    | TokenKind::PercentEq
+                    | TokenKind::AmpEq
+                    | TokenKind::PipeEq
+                    | TokenKind::CaretEq
+                    | TokenKind::LtLtEq
+                    | TokenKind::GtGtEq
+                    | TokenKind::Comma    // argument list: foo(a, b * c)
             ) || (before == TokenKind::Keyword
-                && matches!(self.tokens[b].lexeme, "return" | "case" | "throw"));
+                && matches!(self.tokens[b].lexeme, "return" | "case" | "throw"))
+                // `(` preceded by an expression op means we're in an expression subgroup
+                || (before == TokenKind::LParen && b > 0 && {
+                    let mut bb = b - 1;
+                    while bb > 0
+                        && matches!(
+                            self.tokens[bb].kind,
+                            TokenKind::Whitespace | TokenKind::Newline
+                        )
+                    {
+                        bb -= 1;
+                    }
+                    let outer = self.tokens[bb].kind;
+                    matches!(
+                        outer,
+                        TokenKind::Eq
+                            | TokenKind::Plus
+                            | TokenKind::Minus
+                            | TokenKind::Slash
+                            | TokenKind::Percent
+                            | TokenKind::Pipe
+                            | TokenKind::Caret
+                            | TokenKind::LtLt
+                            | TokenKind::GtGt
+                            | TokenKind::EqEq
+                            | TokenKind::BangEq
+                            | TokenKind::Lt
+                            | TokenKind::LtEq
+                            | TokenKind::GtEq
+                            | TokenKind::AmpAmp
+                            | TokenKind::PipePipe
+                            | TokenKind::PlusEq
+                            | TokenKind::MinusEq
+                            | TokenKind::StarEq
+                            | TokenKind::SlashEq
+                            | TokenKind::PercentEq
+                            | TokenKind::AmpEq
+                            | TokenKind::PipeEq
+                            | TokenKind::CaretEq
+                            | TokenKind::LtLtEq
+                            | TokenKind::GtGtEq
+                            | TokenKind::Comma
+                            | TokenKind::LParen
+                    ) || (outer == TokenKind::Keyword
+                        && matches!(
+                            self.tokens[bb].lexeme,
+                            "if" | "while" | "for" | "switch" | "return" | "case" | "throw"
+                        ))
+                });
             if is_expr_op {
                 return false;
             }
@@ -1194,7 +1277,7 @@ impl<'src> Fmt<'src> {
                         self.indent();
                     } else if self.needs_space(TokenKind::LParen) {
                         self.space();
-                    } else if self.next_is_ptr_or_ref()
+                    } else if self.next_is_fn_ptr_declarator()
                         && matches!(
                             self.prev,
                             Some(TokenKind::Keyword | TokenKind::Ident | TokenKind::RParen)

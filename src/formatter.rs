@@ -1964,9 +1964,17 @@ fn trailing_doxygen_col(line: &str) -> Option<usize> {
     None
 }
 
+/// True for a struct/class member line that has no `/**<` comment but should not
+/// break an alignment group — blank lines and closing-brace lines do break it.
+fn is_transparent_doxygen_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    !trimmed.is_empty() && !trimmed.starts_with('}')
+}
+
 /// Align trailing `/**<` Doxygen member comments within groups of consecutive
-/// lines that all carry such a comment.  Each group aligns to the widest code
-/// column + 1 space.
+/// lines that all carry such a comment.  Comment-less member lines (e.g. a field
+/// with no doc) are transparent: they extend the group without being rewritten
+/// themselves.  Blank lines and closing-brace lines break the group.
 fn align_doxygen_comments(output: &str, nl: &str) -> String {
     let lines: Vec<&str> = output.split(nl).collect();
     let n = lines.len();
@@ -1976,17 +1984,24 @@ fn align_doxygen_comments(output: &str, nl: &str) -> String {
     let mut i = 0;
     while i < n {
         if cols[i].is_some() {
+            // Extend the group through comment-less member lines as well.
             let mut j = i + 1;
-            while j < n && cols[j].is_some() {
+            while j < n && (cols[j].is_some() || is_transparent_doxygen_line(lines[j])) {
                 j += 1;
             }
-            if j > i + 1 {
-                let max_code_len = (i..j)
-                    .map(|k| lines[k][..cols[k].unwrap()].trim_end().len())
+            // Trim trailing transparent lines that have no /**< after them.
+            while j > i + 1 && cols[j - 1].is_none() {
+                j -= 1;
+            }
+            let commented: Vec<usize> = (i..j).filter(|&k| cols[k].is_some()).collect();
+            if commented.len() > 1 {
+                let max_code_len = commented
+                    .iter()
+                    .map(|&k| lines[k][..cols[k].unwrap()].trim_end().len())
                     .max()
                     .unwrap();
                 let target = max_code_len + 1;
-                for k in i..j {
+                for k in commented {
                     let col = cols[k].unwrap();
                     let code = lines[k][..col].trim_end();
                     let comment = &lines[k][col..];
@@ -3151,6 +3166,24 @@ mod tests {
         assert_eq!(
             inline_positions[0], inline_positions[1],
             "two inline /**< comments must be aligned:\n{out}"
+        );
+    }
+
+    #[test]
+    fn align_doxygen_comments_transparent_member_bridges_group() {
+        // A comment-less member between two /**< members must not break the group.
+        let src = "typedef struct {\n\
+            int a; /**< first */\n\
+            int b; /**< second */\n\
+            int no_comment;\n\
+            int c; /**< third */\n\
+            } S;\n";
+        let out = fmt_with(src, &cfg_doxygen_align(1));
+        let positions: Vec<usize> = out.lines().filter_map(trailing_doxygen_col).collect();
+        assert_eq!(positions.len(), 3, "expected 3 doxygen comments:\n{out}");
+        assert!(
+            positions[0] == positions[1] && positions[1] == positions[2],
+            "all three /**< comments must align to same column:\n{out}"
         );
     }
 

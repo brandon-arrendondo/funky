@@ -119,6 +119,7 @@ pub struct SpacingConfig {
     pub space_inside_brackets: bool,
     pub space_after_cast: bool,
     pub pointer_align: PointerAlign,
+    pub space_inside_angle_brackets: bool,
 }
 
 impl Default for SpacingConfig {
@@ -132,6 +133,7 @@ impl Default for SpacingConfig {
             space_inside_brackets: false,
             space_after_cast: false,
             pointer_align: PointerAlign::Middle,
+            space_inside_angle_brackets: false,
         }
     }
 }
@@ -208,6 +210,7 @@ space_inside_parens        = false
 space_inside_brackets      = false
 space_after_cast           = false
 pointer_align              = "middle"
+space_inside_angle_brackets = false
 
 [newlines]
 style           = "lf"

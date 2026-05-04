@@ -48,6 +48,12 @@ struct Fmt<'src> {
     /// cleared. Used to suppress the space between a pointer `*`/`&` and the
     /// following identifier in `name` pointer-alignment mode.
     suppress_next_space: bool,
+    /// Nesting depth inside template angle brackets `<…>`. Zero outside any
+    /// template argument list.
+    template_depth: u32,
+    /// Set when the last non-whitespace token emitted was a template-closing `>`.
+    /// Used to treat `>` like an identifier for call-paren spacing purposes.
+    last_was_template_close: bool,
 }
 
 impl<'src> Fmt<'src> {
@@ -69,6 +75,8 @@ impl<'src> Fmt<'src> {
             pending_switch: false,
             in_case_label: false,
             suppress_next_space: false,
+            template_depth: 0,
+            last_was_template_close: false,
         }
     }
 
@@ -130,6 +138,13 @@ impl<'src> Fmt<'src> {
         if self.indent_level > 0 {
             self.at_line_start = false;
         }
+    }
+
+    /// Update `self.prev` and clear the template-close flag in one step.
+    /// Template-close arms must NOT use this — they set the two fields directly.
+    fn set_prev(&mut self, kind: TokenKind) {
+        self.prev = Some(kind);
+        self.last_was_template_close = false;
     }
 
     fn space(&mut self) {
@@ -239,6 +254,73 @@ impl<'src> Fmt<'src> {
         )
     }
 
+    // ── Template angle-bracket detection ─────────────────────────────────────
+
+    /// Returns true when the `<` just consumed looks like the opening of a
+    /// template argument list rather than a less-than comparison.
+    ///
+    /// Scans forward from `self.pos` (the token immediately after `<`).
+    /// Only tokens that can legally appear in a template argument list are
+    /// permitted; the first unexpected token causes an early `false` return.
+    fn looks_like_template_open(&self) -> bool {
+        let mut i = self.pos;
+        let mut depth: u32 = 1;
+        let mut scanned = 0u32;
+        while i < self.tokens.len() && scanned < 256 {
+            scanned += 1;
+            match self.tokens[i].kind {
+                // Whitespace is irrelevant to the heuristic.
+                TokenKind::Whitespace | TokenKind::Newline => {}
+                // Type-like content: names, scoping, pointer/ref modifiers,
+                // separators, and non-type literal parameters.
+                TokenKind::Ident
+                | TokenKind::Keyword
+                | TokenKind::KwStruct
+                | TokenKind::KwClass
+                | TokenKind::KwUnion
+                | TokenKind::KwEnum
+                | TokenKind::KwTemplate
+                | TokenKind::KwTypename
+                | TokenKind::KwUsing
+                | TokenKind::ColonColon
+                | TokenKind::Star
+                | TokenKind::Amp
+                | TokenKind::Comma
+                | TokenKind::LitInt
+                | TokenKind::LitFloat
+                | TokenKind::DotDotDot => {}
+                // Nested `<`: bump depth.
+                TokenKind::Lt => {
+                    depth += 1;
+                }
+                // `>`: pop one level; if we've returned to zero it's the match.
+                TokenKind::Gt => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
+                    if depth == 0 {
+                        return true;
+                    }
+                }
+                // `>>` closes two nesting levels (C++11 `vector<vector<int>>`).
+                // When depth == 1 the second `>` belongs to the outer context,
+                // but this `<` is still a valid template open.
+                TokenKind::GtGt => {
+                    if depth <= 2 {
+                        return true;
+                    }
+                    depth -= 2;
+                }
+                // Anything else (operators, parens, braces, …) means this is
+                // an expression context, not a template argument list.
+                _ => return false,
+            }
+            i += 1;
+        }
+        false
+    }
+
     // ── Spacing decision ──────────────────────────────────────────────────────
 
     /// Should a space be emitted before `next`, given the last emitted token `prev`?
@@ -247,6 +329,12 @@ impl<'src> Fmt<'src> {
             Some(k) => k,
             None => return false,
         };
+
+        // Inside a template argument list: spacing after `<` and before `>`
+        // is controlled solely by space_inside_angle_brackets.
+        if prev == TokenKind::Lt && self.template_depth > 0 {
+            return self.config.spacing.space_inside_angle_brackets;
+        }
 
         // Never space before these closers / punctuation
         if matches!(
@@ -321,7 +409,9 @@ impl<'src> Fmt<'src> {
             if prev.is_control_kw() {
                 return self.config.spacing.space_before_keyword_paren;
             }
-            if matches!(prev, TokenKind::Ident) {
+            // Template close `>` behaves like an identifier: `vector<int>()`
+            // uses call-paren spacing, not the default "always space" path.
+            if matches!(prev, TokenKind::Ident) || self.last_was_template_close {
                 return self.config.spacing.space_before_call_paren;
             }
             if matches!(prev, TokenKind::RParen) {
@@ -413,7 +503,7 @@ impl<'src> Fmt<'src> {
                     if !self.at_line_start {
                         self.nl();
                     }
-                    self.prev = Some(TokenKind::PreprocLine);
+                    self.set_prev(TokenKind::PreprocLine);
                 }
 
                 // ── Line comment ──────────────────────────────────────────────
@@ -428,7 +518,7 @@ impl<'src> Fmt<'src> {
                     let body = tok.lexeme.trim_end_matches(['\n', '\r']);
                     self.write(body);
                     self.nl();
-                    self.prev = Some(TokenKind::CommentLine);
+                    self.set_prev(TokenKind::CommentLine);
                 }
 
                 // ── Block comment ─────────────────────────────────────────────
@@ -447,7 +537,7 @@ impl<'src> Fmt<'src> {
                         .replace('\r', "\n")
                         .replace('\n', nl);
                     self.write(&normalized);
-                    self.prev = Some(TokenKind::CommentBlock);
+                    self.set_prev(TokenKind::CommentBlock);
                 }
 
                 // ── Opening brace ─────────────────────────────────────────────
@@ -487,7 +577,7 @@ impl<'src> Fmt<'src> {
                     self.indent_level += 1;
                     self.nl();
                     self.skip_next_newline = true;
-                    self.prev = Some(TokenKind::LBrace);
+                    self.set_prev(TokenKind::LBrace);
                 }
 
                 // ── Closing brace ─────────────────────────────────────────────
@@ -557,7 +647,7 @@ impl<'src> Fmt<'src> {
                         self.skip_next_newline = true;
                     }
 
-                    self.prev = Some(TokenKind::RBrace);
+                    self.set_prev(TokenKind::RBrace);
                 }
 
                 // ── Semicolon ─────────────────────────────────────────────────
@@ -575,7 +665,7 @@ impl<'src> Fmt<'src> {
                             self.skip_next_newline = true;
                         }
                     }
-                    self.prev = Some(TokenKind::Semi);
+                    self.set_prev(TokenKind::Semi);
                 }
 
                 // ── Paren depth tracking ──────────────────────────────────────
@@ -586,7 +676,7 @@ impl<'src> Fmt<'src> {
                     }
                     self.write("(");
                     self.paren_depth += 1;
-                    self.prev = Some(TokenKind::LParen);
+                    self.set_prev(TokenKind::LParen);
                 }
                 TokenKind::RParen => {
                     self.flush_blank_lines();
@@ -595,7 +685,7 @@ impl<'src> Fmt<'src> {
                     }
                     self.write(")");
                     self.paren_depth = self.paren_depth.saturating_sub(1);
-                    self.prev = Some(TokenKind::RParen);
+                    self.set_prev(TokenKind::RParen);
                 }
 
                 // ── Bracket depth tracking ────────────────────────────────────
@@ -603,7 +693,7 @@ impl<'src> Fmt<'src> {
                     self.flush_blank_lines();
                     self.write("[");
                     self.bracket_depth += 1;
-                    self.prev = Some(TokenKind::LBracket);
+                    self.set_prev(TokenKind::LBracket);
                 }
                 TokenKind::RBracket => {
                     self.flush_blank_lines();
@@ -612,7 +702,7 @@ impl<'src> Fmt<'src> {
                     }
                     self.write("]");
                     self.bracket_depth = self.bracket_depth.saturating_sub(1);
-                    self.prev = Some(TokenKind::RBracket);
+                    self.set_prev(TokenKind::RBracket);
                 }
 
                 // ── Colon after case / default ────────────────────────────────
@@ -624,7 +714,7 @@ impl<'src> Fmt<'src> {
                         self.nl();
                         self.skip_next_newline = true;
                     }
-                    self.prev = Some(TokenKind::Colon);
+                    self.set_prev(TokenKind::Colon);
                 }
 
                 // ── switch keyword — arm to set pending_switch ────────────────
@@ -637,7 +727,7 @@ impl<'src> Fmt<'src> {
                     }
                     self.pending_switch = true;
                     self.write(tok.lexeme);
-                    self.prev = Some(tok.kind);
+                    self.set_prev(tok.kind);
                 }
 
                 // ── case / default labels — dedented to switch level ──────────
@@ -656,7 +746,54 @@ impl<'src> Fmt<'src> {
                     }
                     self.in_case_label = true;
                     self.write(tok.lexeme);
-                    self.prev = Some(tok.kind);
+                    self.set_prev(tok.kind);
+                }
+
+                // ── Template angle brackets ───────────────────────────────────
+                TokenKind::Lt
+                    if matches!(
+                        self.prev,
+                        Some(TokenKind::Ident | TokenKind::KwTemplate | TokenKind::Gt)
+                    ) && self.looks_like_template_open() =>
+                {
+                    self.flush_blank_lines();
+                    // No space between the name and `<`: `vector<int>` not `vector <int>`.
+                    if self.at_line_start {
+                        self.indent();
+                    }
+                    self.write("<");
+                    self.template_depth += 1;
+                    if self.config.spacing.space_inside_angle_brackets {
+                        self.space();
+                    }
+                    self.set_prev(TokenKind::Lt);
+                }
+
+                TokenKind::Gt if self.template_depth > 0 => {
+                    self.flush_blank_lines();
+                    if self.config.spacing.space_inside_angle_brackets && !self.at_line_start {
+                        self.space();
+                    } else if self.at_line_start {
+                        self.indent();
+                    }
+                    self.write(">");
+                    self.template_depth -= 1;
+                    self.prev = Some(TokenKind::Gt);
+                    self.last_was_template_close = true;
+                }
+
+                // `>>` closing two nested template levels: `vector<vector<int>>`
+                TokenKind::GtGt if self.template_depth >= 2 => {
+                    self.flush_blank_lines();
+                    if self.config.spacing.space_inside_angle_brackets && !self.at_line_start {
+                        self.space();
+                    } else if self.at_line_start {
+                        self.indent();
+                    }
+                    self.write(">>");
+                    self.template_depth -= 2;
+                    self.prev = Some(TokenKind::Gt);
+                    self.last_was_template_close = true;
                 }
 
                 // ── Pointer / reference declarator ───────────────────────────
@@ -691,7 +828,7 @@ impl<'src> Fmt<'src> {
                         }
                     }
                     self.write(tok.lexeme);
-                    self.prev = Some(tok.kind);
+                    self.set_prev(tok.kind);
                 }
 
                 // ── Everything else ───────────────────────────────────────────
@@ -705,7 +842,7 @@ impl<'src> Fmt<'src> {
                     }
 
                     self.write(tok.lexeme);
-                    self.prev = Some(tok.kind);
+                    self.set_prev(tok.kind);
                 }
             }
         }
@@ -961,6 +1098,74 @@ mod tests {
         let src = "int r=a*b;";
         let out = fmt_with(src, &config);
         assert!(out.contains("a * b"), "multiplication spaces: got\n{out}");
+    }
+
+    #[test]
+    fn template_no_spaces_default() {
+        // Default: no spaces inside angle brackets.
+        let src = "std::vector<int> v;";
+        let out = fmt(src);
+        assert!(out.contains("vector<int>"), "got:\n{out}");
+    }
+
+    #[test]
+    fn template_map_two_args() {
+        let src = "std::map<std::string,int> m;";
+        let out = fmt(src);
+        assert!(out.contains("map<std::string, int>"), "got:\n{out}");
+    }
+
+    #[test]
+    fn template_nested() {
+        let src = "std::vector<std::vector<int>> vv;";
+        let out = fmt(src);
+        assert!(out.contains("vector<std::vector<int>>"), "got:\n{out}");
+    }
+
+    #[test]
+    fn template_space_inside() {
+        use crate::config::SpacingConfig;
+        let config = Config {
+            spacing: SpacingConfig {
+                space_inside_angle_brackets: true,
+                ..SpacingConfig::default()
+            },
+            ..Config::default()
+        };
+        let src = "std::vector<int> v;";
+        let out = fmt_with(src, &config);
+        assert!(out.contains("vector< int >"), "got:\n{out}");
+    }
+
+    #[test]
+    fn template_declaration_keyword() {
+        // `template<…>` — keyword triggers the heuristic.
+        let src = "template<typename T> void f(T x);";
+        let out = fmt(src);
+        assert!(out.contains("template<typename T>"), "got:\n{out}");
+    }
+
+    #[test]
+    fn comparison_less_than_unchanged() {
+        // Plain comparison: spaces must be preserved.
+        let src = "int r=(a<b);";
+        let out = fmt(src);
+        assert!(out.contains("a < b"), "comparison lost spaces:\n{out}");
+    }
+
+    #[test]
+    fn comparison_greater_than_unchanged() {
+        let src = "int r=(a>b);";
+        let out = fmt(src);
+        assert!(out.contains("a > b"), "comparison lost spaces:\n{out}");
+    }
+
+    #[test]
+    fn template_constructor_call() {
+        // No space between `>` and `(` for constructor call.
+        let src = "auto v=std::vector<int>();";
+        let out = fmt(src);
+        assert!(out.contains("vector<int>()"), "got:\n{out}");
     }
 
     #[test]

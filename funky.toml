@@ -10,6 +10,7 @@ style = "kr"       # "kr" (same line), "allman" (own line), "stroustrup"
 cuddle_else         = false
 cuddle_catch        = true
 collapse_empty_body = true
+fn_brace_newline    = true   # true: function-def { on its own line; false: follow style
 
 [spacing]
 space_before_call_paren    = false  # foo(  vs  foo (

@@ -100,6 +100,11 @@ pub struct BraceConfig {
     /// limit to one element per line.  Nested-brace initializers are not
     /// affected (they fall through to normal block formatting).
     pub expand_large_initializers: bool,
+    /// When `true` (default), function-definition opening braces always go on
+    /// their own line regardless of `style`.  Control-flow braces (`if`, `for`,
+    /// `while`, `switch`) are not affected and follow `style` as usual.
+    /// Matches `nl_fdef_brace = add` in uncrustify.
+    pub fn_brace_newline: bool,
 }
 
 impl Default for BraceConfig {
@@ -110,6 +115,7 @@ impl Default for BraceConfig {
             cuddle_catch: true,
             collapse_empty_body: true,
             expand_large_initializers: true,
+            fn_brace_newline: true,
         }
     }
 }
@@ -234,6 +240,7 @@ cuddle_else = true
 cuddle_catch = true
 collapse_empty_body = true
 expand_large_initializers = false
+fn_brace_newline = true
 
 [spacing]
 space_before_call_paren    = false

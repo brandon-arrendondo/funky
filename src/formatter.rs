@@ -333,6 +333,23 @@ impl<'src> Fmt<'src> {
         self.indent();
     }
 
+    /// For KR/Stroustrup enforcement: trim all trailing whitespace from the
+    /// output so the next token can be appended to the end of the previous
+    /// content line (e.g. `if (cond)\n    {` → `if (cond) {`).
+    fn trim_to_prev_line_end(&mut self) {
+        let new_len = self
+            .output
+            .trim_end_matches(|c: char| c.is_ascii_whitespace())
+            .len();
+        self.output.truncate(new_len);
+        if let Some(pos) = self.output.rfind('\n') {
+            self.current_col = self.output[pos + 1..].chars().count();
+        } else {
+            self.current_col = self.output.chars().count();
+        }
+        self.at_line_start = false;
+    }
+
     // ── Cast detection ────────────────────────────────────────────────────────
 
     /// True if the tokens from `self.pos` up to and including a matching `)`
@@ -486,8 +503,98 @@ impl<'src> Fmt<'src> {
 
     // ── Brace context inference ───────────────────────────────────────────────
 
+    /// Returns the effective previous token kind for brace-context inference,
+    /// looking through any trailing comments so that `if (cond) /* note */ {`
+    /// is classified the same as `if (cond) {`.
+    fn prev_through_comments(&self) -> Option<TokenKind> {
+        if !matches!(
+            self.prev,
+            Some(TokenKind::CommentBlock | TokenKind::CommentLine)
+        ) {
+            return self.prev;
+        }
+        // self.pos is one past the LBrace; self.pos-1 is LBrace.  Scan backward.
+        if self.pos < 2 {
+            return None;
+        }
+        let mut i = self.pos - 2;
+        loop {
+            match self.tokens[i].kind {
+                TokenKind::Whitespace
+                | TokenKind::Newline
+                | TokenKind::CommentBlock
+                | TokenKind::CommentLine => {
+                    if i == 0 {
+                        return None;
+                    }
+                    i -= 1;
+                }
+                k => return Some(k),
+            }
+        }
+    }
+
+    /// Returns `true` when the `RParen` immediately before `{` closes a
+    /// control-flow construct (`if`, `while`, `for`, `switch`) rather than a
+    /// function parameter list.  Scans backward past the `)…(` group and checks
+    /// the keyword before the `(`.
+    fn rparen_closes_ctrl_flow(&self) -> bool {
+        if self.pos < 2 {
+            return false;
+        }
+        let mut i = self.pos - 2; // token before LBrace
+                                  // skip whitespace / comments between ) and {
+        while matches!(
+            self.tokens[i].kind,
+            TokenKind::Whitespace
+                | TokenKind::Newline
+                | TokenKind::CommentBlock
+                | TokenKind::CommentLine
+        ) {
+            if i == 0 {
+                return false;
+            }
+            i -= 1;
+        }
+        if self.tokens[i].kind != TokenKind::RParen {
+            return false;
+        }
+        // find the matching '('
+        let mut depth = 1usize;
+        loop {
+            if i == 0 {
+                return false;
+            }
+            i -= 1;
+            match self.tokens[i].kind {
+                TokenKind::RParen => depth += 1,
+                TokenKind::LParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        // skip whitespace before '('
+        while i > 0 {
+            i -= 1;
+            if !matches!(
+                self.tokens[i].kind,
+                TokenKind::Whitespace | TokenKind::Newline
+            ) {
+                break;
+            }
+        }
+        matches!(
+            self.tokens[i].kind,
+            TokenKind::KwIf | TokenKind::KwWhile | TokenKind::KwFor | TokenKind::KwSwitch
+        )
+    }
+
     fn infer_brace_ctx(&self) -> BraceCtx {
-        let prev = match self.prev {
+        let prev = match self.prev_through_comments() {
             Some(k) => k,
             None => return BraceCtx::Other,
         };
@@ -1131,10 +1238,21 @@ impl<'src> Fmt<'src> {
                                 self.write("{");
                             }
                             BraceStyle::Kr | BraceStyle::Stroustrup => {
-                                if !self.at_line_start {
-                                    self.space();
+                                // fn_brace_newline: function-definition braces go on
+                                // their own line even in KR mode.  Control-flow
+                                // constructs (if/for/while/switch) always stay on the
+                                // same line.
+                                let fn_newline = ctx == BraceCtx::Function
+                                    && self.config.braces.fn_brace_newline
+                                    && !self.rparen_closes_ctrl_flow();
+                                if fn_newline {
+                                    self.ensure_own_line();
                                 } else {
-                                    self.indent();
+                                    if self.at_line_start {
+                                        // Source had Allman-style brace; enforce KR.
+                                        self.trim_to_prev_line_end();
+                                    }
+                                    self.space();
                                 }
                                 self.write("{");
                             }
@@ -1500,7 +1618,11 @@ impl<'src> Fmt<'src> {
                 // `&x`, `-1`, `+x` stay compact.
                 TokenKind::Star | TokenKind::Amp | TokenKind::Plus | TokenKind::Minus => {
                     self.flush_blank_lines();
-                    let is_binary = self.prev.is_some_and(|p| p.ends_expr());
+                    // At line start (e.g. `*ptr = ...` after a standalone block
+                    // comment) the operator is always unary, never binary — even
+                    // if the previous emitted token was a CommentBlock which
+                    // satisfies ends_expr().
+                    let is_binary = !self.at_line_start && self.prev.is_some_and(|p| p.ends_expr());
                     if self.at_line_start {
                         self.indent();
                     } else if self.needs_space(tok.kind) {
@@ -1783,6 +1905,7 @@ mod tests {
                 cuddle_catch: false,
                 collapse_empty_body: false,
                 expand_large_initializers: true,
+                fn_brace_newline: false,
             },
             ..Config::default()
         };
@@ -1795,12 +1918,13 @@ mod tests {
 
     #[test]
     fn collapse_empty_function_body() {
-        // `{\n}` should become `{}` when collapse_empty_body = true (default).
+        // With fn_brace_newline=true (default), `{` goes to its own line.
+        // collapse_empty_body then collapses `{\n}` to `{}` on that same new line.
         let src = "void f() {\n}\n";
         let out = fmt(src);
         assert!(
-            out.contains("void f() {}"),
-            "empty function body should collapse to {{}}: {out}"
+            out.contains("void f()\n{}"),
+            "empty function body should collapse to {{}} on new line: {out}"
         );
     }
 
@@ -1824,6 +1948,7 @@ mod tests {
                 cuddle_catch: false,
                 collapse_empty_body: false,
                 expand_large_initializers: true,
+                fn_brace_newline: true,
             },
             ..Config::default()
         };
@@ -1880,6 +2005,7 @@ mod tests {
                 cuddle_catch: true,
                 collapse_empty_body: true,
                 expand_large_initializers: false,
+                fn_brace_newline: true,
             },
             ..Config::default()
         };
@@ -2143,6 +2269,71 @@ mod tests {
     }
 
     #[test]
+    fn deref_after_block_comment_no_space() {
+        // `/* comment */\n*ptr = val;` — deref at line start after a block
+        // comment must not gain a space between `*` and the name.
+        let src = "void f(void) {\n/* get it */\n*ptr = val;\n}";
+        let out = fmt(src);
+        assert!(
+            out.contains("*ptr"),
+            "deref at line start after block comment must not gain a space: got\n{out}"
+        );
+        assert!(!out.contains("* ptr"), "got spurious space in deref: {out}");
+    }
+
+    #[test]
+    fn brace_after_comment_retains_indent() {
+        // `if (cond) /* note */\n{` — KR enforcement must move { to the same
+        // line, not emit it at column 0.
+        let src = "void f(void) {\nif (x) /* note */\n{\nreturn;\n}\n}";
+        let out = fmt(src);
+        assert!(
+            out.contains("if (x) /* note */ {"),
+            "control-flow brace must be on same line after trailing comment: got\n{out}"
+        );
+    }
+
+    #[test]
+    fn fn_brace_newline_default() {
+        // Default: function-definition { goes on its own line.
+        let src = "int foo(void) { return 0; }";
+        let out = fmt(src);
+        assert!(
+            out.contains("foo(void)\n"),
+            "function brace must be on new line by default: got\n{out}"
+        );
+    }
+
+    #[test]
+    fn fn_brace_newline_false_keeps_same_line() {
+        use crate::config::BraceConfig;
+        let cfg = Config {
+            braces: BraceConfig {
+                fn_brace_newline: false,
+                ..BraceConfig::default()
+            },
+            ..Config::default()
+        };
+        let src = "int foo(void) { return 0; }";
+        let out = fmt_with(src, &cfg);
+        assert!(
+            out.contains("foo(void) {"),
+            "fn_brace_newline=false must keep brace on same line: got\n{out}"
+        );
+    }
+
+    #[test]
+    fn ctrl_flow_brace_same_line_with_fn_newline() {
+        // Even when fn_brace_newline=true, control-flow braces stay on same line.
+        let src = "void f(void) {\nif (x)\n{\nreturn;\n}\n}";
+        let out = fmt(src);
+        assert!(
+            out.contains("if (x) {"),
+            "control-flow brace must stay on same line: got\n{out}"
+        );
+    }
+
+    #[test]
     fn template_no_spaces_default() {
         // Default: no spaces inside angle brackets.
         let src = "std::vector<int> v;";
@@ -2310,11 +2501,12 @@ mod tests {
     fn void_cast_statement_indented() {
         // (void)expr; at block scope must keep indentation and must not gain a
         // spurious space after the cast when space_after_cast = false (default).
+        // fn_brace_newline=true (default) puts the function { on its own line.
         let src = "void f() {\n    (void)func();\n    (void)bar(1, 2);\n}\n";
         let out = fmt(src);
         assert_eq!(
             out,
-            "void f() {\n    (void)func();\n    (void)bar(1, 2);\n}\n"
+            "void f()\n{\n    (void)func();\n    (void)bar(1, 2);\n}\n"
         );
     }
 
@@ -2444,10 +2636,11 @@ mod tests {
 
     #[test]
     fn extern_c_nested_function_still_indents() {
+        // fn_brace_newline=true puts function { on its own line.
         let src = "extern \"C\" {\nvoid foo(void) {\nint x = 1;\n}\n}\n";
         let out = fmt(src);
         assert!(
-            out.contains("\nvoid foo(void) {"),
+            out.contains("\nvoid foo(void)\n"),
             "function declaration in extern \"C\" should not be indented, got:\n{out}"
         );
         assert!(

@@ -94,6 +94,8 @@ pub struct BraceConfig {
     pub style: BraceStyle,
     pub cuddle_else: bool,
     pub cuddle_catch: bool,
+    /// Collapse `{\n}` to `{}` when the body is empty.
+    pub collapse_empty_body: bool,
 }
 
 impl Default for BraceConfig {
@@ -102,6 +104,7 @@ impl Default for BraceConfig {
             style: BraceStyle::Kr,
             cuddle_else: true,
             cuddle_catch: true,
+            collapse_empty_body: true,
         }
     }
 }
@@ -211,6 +214,7 @@ width = 4
 style = "kr"
 cuddle_else = true
 cuddle_catch = true
+collapse_empty_body = true
 
 [spacing]
 space_before_call_paren    = false

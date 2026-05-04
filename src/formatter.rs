@@ -925,6 +925,74 @@ impl<'src> Fmt<'src> {
                         },
                     }
 
+                    // ── Empty-body collapse ───────────────────────────────────
+                    // When collapse_empty_body is set and the only content between
+                    // `{` and `}` is whitespace, emit `{}` on the same line.
+                    if self.config.braces.collapse_empty_body {
+                        let mut look = self.pos;
+                        while look < self.tokens.len()
+                            && matches!(
+                                self.tokens[look].kind,
+                                TokenKind::Whitespace | TokenKind::Newline
+                            )
+                        {
+                            look += 1;
+                        }
+                        if self.tokens.get(look).map(|t| t.kind) == Some(TokenKind::RBrace) {
+                            // Consume whitespace + the `}` token.
+                            self.pos = look + 1;
+                            self.write("}");
+
+                            // Replicate the post-`}` newline/spacing decisions from
+                            // the RBrace arm so callers see the same output shape.
+                            let mut after = self.pos;
+                            while after < self.tokens.len()
+                                && matches!(
+                                    self.tokens[after].kind,
+                                    TokenKind::Whitespace | TokenKind::Newline
+                                )
+                            {
+                                after += 1;
+                            }
+                            let next_kind = self.tokens.get(after).map(|t| t.kind);
+
+                            let semi_follows = next_kind == Some(TokenKind::Semi);
+                            let typedef_name = matches!(ctx, BraceCtx::Type)
+                                && matches!(next_kind, Some(TokenKind::Ident));
+                            let cuddle = match next_kind {
+                                Some(TokenKind::KwElse) => self.config.braces.cuddle_else,
+                                Some(TokenKind::KwCatch) => self.config.braces.cuddle_catch,
+                                Some(TokenKind::KwWhile) => matches!(ctx, BraceCtx::Block),
+                                _ => false,
+                            };
+
+                            if semi_follows {
+                                // `;` will be written by the Semi arm directly.
+                            } else if typedef_name
+                                || (cuddle && matches!(self.config.braces.style, BraceStyle::Kr))
+                            {
+                                self.space();
+                            } else if cuddle
+                                && matches!(self.config.braces.style, BraceStyle::Stroustrup)
+                                && next_kind == Some(TokenKind::KwElse)
+                            {
+                                self.nl();
+                                self.skip_next_newline = true;
+                            } else if self.peek_inline_comment(tok.span.line) {
+                                // inline comment — let CommentLine close the line
+                            } else {
+                                self.nl();
+                                self.skip_next_newline = true;
+                            }
+
+                            self.pending_switch = false;
+                            self.pending_type = false;
+                            self.pending_extern_c = false;
+                            self.set_prev(TokenKind::RBrace);
+                            continue;
+                        }
+                    }
+
                     if ctx == BraceCtx::Switch {
                         self.switch_depth += 1;
                     }
@@ -1379,6 +1447,7 @@ mod tests {
                 style: BraceStyle::Allman,
                 cuddle_else: false,
                 cuddle_catch: false,
+                collapse_empty_body: false,
             },
             ..Config::default()
         };
@@ -1387,6 +1456,47 @@ mod tests {
         // In Allman style, `{` is on its own line
         let brace_line = out.lines().find(|l| l.trim() == "{");
         assert!(brace_line.is_some(), "no standalone brace line in:\n{out}");
+    }
+
+    #[test]
+    fn collapse_empty_function_body() {
+        // `{\n}` should become `{}` when collapse_empty_body = true (default).
+        let src = "void f() {\n}\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("void f() {}"),
+            "empty function body should collapse to {{}}: {out}"
+        );
+    }
+
+    #[test]
+    fn collapse_empty_struct_body() {
+        let src = "struct Foo {\n};\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("struct Foo {};"),
+            "empty struct body should collapse to {{}}; on one line: {out}"
+        );
+    }
+
+    #[test]
+    fn collapse_empty_body_off() {
+        use crate::config::{BraceConfig, BraceStyle};
+        let config = Config {
+            braces: BraceConfig {
+                style: BraceStyle::Kr,
+                cuddle_else: false,
+                cuddle_catch: false,
+                collapse_empty_body: false,
+            },
+            ..Config::default()
+        };
+        let src = "void f() {\n}\n";
+        let out = fmt_with(src, &config);
+        assert!(
+            !out.contains("void f() {}"),
+            "collapse_empty_body=false should not collapse: {out}"
+        );
     }
 
     #[test]

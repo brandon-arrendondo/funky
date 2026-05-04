@@ -7,8 +7,9 @@ width = 4          # spaces per indent level (or tab display width)
 
 [braces]
 style = "kr"       # "kr" (same line), "allman" (own line), "stroustrup"
-cuddle_else  = true
-cuddle_catch = true
+cuddle_else         = false
+cuddle_catch        = true
+collapse_empty_body = true
 
 [spacing]
 space_before_call_paren    = false  # foo(  vs  foo (

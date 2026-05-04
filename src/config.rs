@@ -12,6 +12,17 @@ pub struct Config {
     pub braces: BraceConfig,
     pub spacing: SpacingConfig,
     pub newlines: NewlineConfig,
+    pub ignore: IgnoreConfig,
+}
+
+// ── Ignore ───────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct IgnoreConfig {
+    /// Glob patterns (relative to the directory being walked) to skip.
+    /// Example: ["vendor/**", "third_party/**", "*.pb.h"]
+    pub patterns: Vec<String>,
 }
 
 impl Config {
@@ -223,6 +234,7 @@ final_newline   = true
         assert!(cfg.spacing.space_before_keyword_paren);
         assert!(!cfg.spacing.space_before_call_paren);
         assert_eq!(cfg.newlines.max_blank_lines, 2);
+        assert!(cfg.ignore.patterns.is_empty());
     }
 
     #[test]

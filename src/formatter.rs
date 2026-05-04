@@ -72,6 +72,12 @@ struct Fmt<'src> {
     cast_paren_stack: Vec<bool>,
     /// Set when the last `)` closed a cast paren. Cleared by `set_prev`.
     last_was_cast_close: bool,
+    /// Current output column (chars since last newline). Used to record
+    /// opening-paren column so continuation params can be aligned.
+    current_col: usize,
+    /// Stack parallel to paren_depth: the column to align continuation lines
+    /// to (i.e. the column right after the `(` was written).
+    paren_col_stack: Vec<usize>,
 }
 
 impl<'src> Fmt<'src> {
@@ -101,6 +107,8 @@ impl<'src> Fmt<'src> {
             last_was_template_close: false,
             cast_paren_stack: Vec::new(),
             last_was_cast_close: false,
+            current_col: 0,
+            paren_col_stack: Vec::new(),
         }
     }
 
@@ -146,21 +154,44 @@ impl<'src> Fmt<'src> {
         }
         self.output.push_str(s);
         self.at_line_start = s.ends_with('\n');
+        if let Some(pos) = s.rfind('\n') {
+            self.current_col = s[pos + 1..].chars().count();
+        } else {
+            self.current_col += s.chars().count();
+        }
     }
 
     fn nl(&mut self) {
         self.output.push_str(self.config.newline_str());
         self.at_line_start = true;
         self.suppress_next_space = false;
+        self.current_col = 0;
     }
 
     fn indent(&mut self) {
+        if self.paren_depth > 0 {
+            self.align_to_paren();
+            return;
+        }
         let unit = self.config.indent_str();
         for _ in 0..self.indent_level {
             self.output.push_str(&unit);
+            self.current_col += unit.len();
         }
         if self.indent_level > 0 {
             self.at_line_start = false;
+        }
+    }
+
+    fn align_to_paren(&mut self) {
+        if let Some(&col) = self.paren_col_stack.last() {
+            for _ in 0..col {
+                self.output.push(' ');
+            }
+            self.current_col = col;
+            if col > 0 {
+                self.at_line_start = false;
+            }
         }
     }
 
@@ -179,6 +210,7 @@ impl<'src> Fmt<'src> {
         }
         if !self.at_line_start && !self.output.ends_with(' ') {
             self.output.push(' ');
+            self.current_col += 1;
         }
     }
 
@@ -822,6 +854,7 @@ impl<'src> Fmt<'src> {
                     }
                     self.write("(");
                     self.paren_depth += 1;
+                    self.paren_col_stack.push(self.current_col);
                     self.set_prev(TokenKind::LParen);
                 }
                 TokenKind::RParen => {
@@ -831,6 +864,7 @@ impl<'src> Fmt<'src> {
                     }
                     self.write(")");
                     self.paren_depth = self.paren_depth.saturating_sub(1);
+                    self.paren_col_stack.pop();
                     let is_cast_close = self.cast_paren_stack.pop().unwrap_or(false);
                     self.prev = Some(TokenKind::RParen);
                     self.last_was_template_close = false;
@@ -1570,6 +1604,38 @@ mod tests {
         assert!(
             out.contains("\n    int x = 1;"),
             "body of function inside extern \"C\" should be indented one level, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn param_continuation_alignment() {
+        let src = "void foo(int a,\nint b,\nint c) {}\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("void foo(int a,\n         int b,\n         int c)"),
+            "continuation params should align to opening paren column, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn call_continuation_alignment() {
+        let src = "void f() { result = some_fn(arg1,\narg2,\narg3); }\n";
+        let out = fmt(src);
+        // `    result = some_fn(` = 21 chars, so continuation aligns at col 21
+        assert!(
+            out.contains("some_fn(arg1,\n                     arg2,\n                     arg3)"),
+            "continuation call args should align to opening paren, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn nested_paren_continuation_alignment() {
+        let src = "void f() { foo(bar(x,\ny), z); }\n";
+        let out = fmt(src);
+        // `    foo(bar(` = 12 chars, so inner continuation aligns at col 12
+        assert!(
+            out.contains("bar(x,\n            y)"),
+            "nested paren continuation should align to inner opening paren, got:\n{out}"
         );
     }
 }

@@ -470,7 +470,8 @@ impl<'src> Fmt<'src> {
             }
             // Template close `>` behaves like an identifier: `vector<int>()`
             // uses call-paren spacing, not the default "always space" path.
-            if matches!(prev, TokenKind::Ident) || self.last_was_template_close {
+            if matches!(prev, TokenKind::Ident | TokenKind::Keyword) || self.last_was_template_close
+            {
                 return self.config.spacing.space_before_call_paren;
             }
             if matches!(prev, TokenKind::RParen) {
@@ -1416,6 +1417,26 @@ mod tests {
         assert!(
             out.contains("(double)(int)x"),
             "double cast should have no space between: {out}"
+        );
+    }
+
+    #[test]
+    fn sizeof_no_space_before_paren() {
+        let src = "int x = sizeof(int);\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("sizeof(int)"),
+            "sizeof should not get space before paren: {out}"
+        );
+    }
+
+    #[test]
+    fn alignof_no_space_before_paren() {
+        let src = "int x = alignof(int);\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("alignof(int)"),
+            "alignof should not get space before paren: {out}"
         );
     }
 }

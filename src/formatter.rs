@@ -239,6 +239,31 @@ impl<'src> Fmt<'src> {
         )
     }
 
+    // ── Small initializer detection ───────────────────────────────────────────
+
+    /// Scans forward from `self.pos` (the token immediately after `{`) looking
+    /// for the matching `}`.  Returns `Some(rbrace_index)` when the initializer
+    /// has no nested braces and contains at most 16 non-whitespace tokens, so
+    /// it can safely be kept on a single line.  Returns `None` otherwise.
+    fn small_initializer_end(&self) -> Option<usize> {
+        const MAX_TOKENS: usize = 16;
+        let mut count = 0;
+        for (offset, tk) in self.tokens[self.pos..].iter().enumerate() {
+            match tk.kind {
+                TokenKind::LBrace => return None,
+                TokenKind::RBrace => return Some(self.pos + offset),
+                TokenKind::Whitespace | TokenKind::Newline => {}
+                _ => {
+                    count += 1;
+                    if count > MAX_TOKENS {
+                        return None;
+                    }
+                }
+            }
+        }
+        None
+    }
+
     // ── Brace context inference ───────────────────────────────────────────────
 
     fn infer_brace_ctx(&self) -> BraceCtx {
@@ -619,6 +644,36 @@ impl<'src> Fmt<'src> {
                                 self.space();
                             }
                             self.write("{");
+
+                            // Small initializer: keep entirely on one line.
+                            if let Some(end) = self.small_initializer_end() {
+                                let content: Vec<(&str, TokenKind)> = self.tokens[self.pos..end]
+                                    .iter()
+                                    .filter(|t| {
+                                        !matches!(
+                                            t.kind,
+                                            TokenKind::Whitespace | TokenKind::Newline
+                                        )
+                                    })
+                                    .map(|t| (t.lexeme, t.kind))
+                                    .collect();
+
+                                if content.is_empty() {
+                                    self.write("}");
+                                } else {
+                                    self.write(" ");
+                                    for (idx, (lex, kind)) in content.iter().enumerate() {
+                                        if idx > 0 && !matches!(kind, TokenKind::Comma) {
+                                            self.write(" ");
+                                        }
+                                        self.write(lex);
+                                    }
+                                    self.write(" }");
+                                }
+                                self.pos = end + 1;
+                                self.set_prev(TokenKind::RBrace);
+                                continue;
+                            }
                         }
                         _ => match self.config.braces.style {
                             BraceStyle::Allman => {
@@ -1060,6 +1115,26 @@ mod tests {
         // In Allman style, `{` is on its own line
         let brace_line = out.lines().find(|l| l.trim() == "{");
         assert!(brace_line.is_some(), "no standalone brace line in:\n{out}");
+    }
+
+    #[test]
+    fn array_initializer_stays_inline() {
+        let src = "uint8_t rx[] = { 0 };";
+        let out = fmt(src);
+        assert!(
+            out.trim_end().ends_with("= { 0 };"),
+            "expected inline initializer, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn multi_element_initializer_stays_inline() {
+        let src = "int a[] = {1, 2, 3};";
+        let out = fmt(src);
+        assert!(
+            out.trim_end().ends_with("= { 1, 2, 3 };"),
+            "expected inline initializer, got:\n{out}"
+        );
     }
 
     #[test]

@@ -360,7 +360,7 @@ impl<'src> Fmt<'src> {
     /// function-pointer return type), `>` (template instantiation), or
     /// `typename`/`struct`/`class`/`union`/`enum`.
     fn is_ptr_decl_context(&self) -> bool {
-        matches!(
+        if matches!(
             self.prev,
             Some(
                 TokenKind::Keyword
@@ -373,6 +373,152 @@ impl<'src> Fmt<'src> {
                     | TokenKind::Amp
                     | TokenKind::RParen
                     | TokenKind::Gt
+            )
+        ) {
+            return true;
+        }
+        // An identifier (user-defined type) followed by `*`/`&` is a pointer
+        // declarator only when the tokens after the operator look like a name,
+        // not an expression.  Heuristic: skip consecutive `*`/`&`/whitespace,
+        // then require an identifier or keyword followed by a declaration-ending
+        // token (`;`, `,`, `)`, `=`, `[`, `{`).
+        if self.prev == Some(TokenKind::Ident) {
+            return self.star_after_ident_is_decl();
+        }
+        false
+    }
+
+    fn star_after_ident_is_decl(&self) -> bool {
+        // ── backward check ───────────────────────────────────────────────────
+        // Scan back past the `*` and the preceding Ident to find the token
+        // that appeared before the type-name.  If that token unambiguously
+        // belongs to an expression (assignment, arithmetic, comparison, …)
+        // then `*` is multiplication, not a pointer declarator.
+        //
+        // self.pos is one past the `*` token.
+        if self.pos >= 1 {
+            let mut b = self.pos - 1; // index of the `*`
+                                      // skip the `*` itself and any whitespace/newlines before the Ident
+            while b > 0
+                && matches!(
+                    self.tokens[b].kind,
+                    TokenKind::Whitespace | TokenKind::Newline | TokenKind::Star | TokenKind::Amp
+                )
+            {
+                b -= 1;
+            }
+            // b should now be the Ident; step past it
+            if b > 0 && self.tokens[b].kind == TokenKind::Ident {
+                b -= 1;
+            }
+            // skip whitespace before the Ident
+            while b > 0
+                && matches!(
+                    self.tokens[b].kind,
+                    TokenKind::Whitespace | TokenKind::Newline
+                )
+            {
+                b -= 1;
+            }
+            // If the token before the Ident is an expression operator, this is
+            // multiplication, not a declaration.
+            let before = self.tokens[b].kind;
+            let is_expr_op = matches!(
+                before,
+                TokenKind::Eq          // assignment: r = a * b
+                    | TokenKind::Plus
+                    | TokenKind::Minus
+                    | TokenKind::Slash
+                    | TokenKind::Percent
+                    | TokenKind::Pipe
+                    | TokenKind::Caret
+                    | TokenKind::LtLt
+                    | TokenKind::GtGt
+                    | TokenKind::EqEq
+                    | TokenKind::BangEq
+                    | TokenKind::Lt
+                    | TokenKind::LtEq
+                    | TokenKind::GtEq
+                    | TokenKind::AmpAmp
+                    | TokenKind::PipePipe
+                    | TokenKind::Question
+            ) || (before == TokenKind::Keyword
+                && matches!(self.tokens[b].lexeme, "return" | "case" | "throw"));
+            if is_expr_op {
+                return false;
+            }
+        }
+
+        // ── forward check ────────────────────────────────────────────────────
+        // After the `*`, the tokens must look like a declarator name, not an
+        // expression operand.
+        let mut i = self.pos;
+        // skip additional pointer/ref operators and whitespace
+        while i < self.tokens.len() {
+            match self.tokens[i].kind {
+                TokenKind::Star | TokenKind::Amp | TokenKind::Whitespace | TokenKind::Newline => {
+                    i += 1;
+                }
+                _ => break,
+            }
+        }
+        // skip optional `const`/`volatile`/`restrict` after the stars
+        while i < self.tokens.len()
+            && matches!(self.tokens[i].kind, TokenKind::Keyword)
+            && matches!(
+                self.tokens[i].lexeme,
+                "const" | "volatile" | "restrict" | "__restrict" | "__restrict__"
+            )
+        {
+            i += 1;
+            while i < self.tokens.len()
+                && matches!(
+                    self.tokens[i].kind,
+                    TokenKind::Whitespace | TokenKind::Newline
+                )
+            {
+                i += 1;
+            }
+        }
+        // skip a qualified name (Ident :: Ident ...)
+        let mut found_name = false;
+        while i < self.tokens.len() {
+            match self.tokens[i].kind {
+                TokenKind::Ident | TokenKind::Keyword => {
+                    found_name = true;
+                    i += 1;
+                }
+                TokenKind::ColonColon => {
+                    i += 1;
+                }
+                TokenKind::Whitespace | TokenKind::Newline => {
+                    i += 1;
+                }
+                _ => break,
+            }
+        }
+        if !found_name {
+            return false;
+        }
+        while i < self.tokens.len()
+            && matches!(
+                self.tokens[i].kind,
+                TokenKind::Whitespace | TokenKind::Newline
+            )
+        {
+            i += 1;
+        }
+        // declaration-terminating tokens
+        matches!(
+            self.tokens.get(i).map(|t| t.kind),
+            Some(
+                TokenKind::Semi
+                    | TokenKind::Comma
+                    | TokenKind::RParen
+                    | TokenKind::Eq
+                    | TokenKind::LBracket
+                    | TokenKind::LBrace
+                    | TokenKind::LParen // function-pointer: Type (*fn)(...)
             )
         )
     }
@@ -1366,6 +1512,41 @@ mod tests {
         let src = "int r=a*b;";
         let out = fmt_with(src, &config);
         assert!(out.contains("a * b"), "multiplication spaces: got\n{out}");
+    }
+
+    #[test]
+    fn pointer_align_name_user_defined_type() {
+        use crate::config::{PointerAlign, SpacingConfig};
+        let config = Config {
+            spacing: SpacingConfig {
+                pointer_align: PointerAlign::Name,
+                ..SpacingConfig::default()
+            },
+            ..Config::default()
+        };
+        // User-defined type names (Ident) must also get pointer_align applied.
+        let src = "MyType * p;";
+        let out = fmt_with(src, &config);
+        assert!(out.contains("MyType *p"), "name mode user type: got\n{out}");
+    }
+
+    #[test]
+    fn pointer_align_name_no_affect_on_multiplication_with_user_ident() {
+        use crate::config::{PointerAlign, SpacingConfig};
+        let config = Config {
+            spacing: SpacingConfig {
+                pointer_align: PointerAlign::Name,
+                ..SpacingConfig::default()
+            },
+            ..Config::default()
+        };
+        // a * b after assignment is multiplication, not a pointer declarator.
+        let src = "int r=a*b;";
+        let out = fmt_with(src, &config);
+        assert!(
+            out.contains("a * b"),
+            "multiplication after assign: got\n{out}"
+        );
     }
 
     #[test]

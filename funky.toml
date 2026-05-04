@@ -22,6 +22,7 @@ space_inside_brackets      = false
 space_after_cast           = false
 pointer_align              = "name"    # "type" (int* p), "name" (int *p), "middle" (int * p)
 space_inside_angle_brackets = false    # false: vector<int>   true: vector< int >
+align_right_cmt_span       = 3        # 0: off; ≥1: column-align trailing // and /* comments
 align_enum_equ_span        = 1        # 0: off; ≥1: align enum = signs within span
 align_doxygen_cmt_span     = 1        # 0: off; ≥1: column-align /**< member comments
 

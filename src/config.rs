@@ -168,7 +168,7 @@ impl Default for SpacingConfig {
             space_after_cast: false,
             pointer_align: PointerAlign::Name,
             space_inside_angle_brackets: false,
-            align_right_cmt_span: 0,
+            align_right_cmt_span: 3,
             align_enum_equ_span: 1,
             align_doxygen_cmt_span: 1,
         }
@@ -266,7 +266,7 @@ space_inside_brackets      = false
 space_after_cast           = false
 pointer_align              = "middle"
 space_inside_angle_brackets = false
-align_right_cmt_span       = 0
+align_right_cmt_span       = 3
 align_enum_equ_span        = 1
 align_doxygen_cmt_span     = 1
 

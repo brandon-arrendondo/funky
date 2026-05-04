@@ -523,13 +523,14 @@ impl<'src> Fmt<'src> {
     }
 
     /// Scans forward from `self.pos` looking for the matching `}`.
-    /// Returns `Some(rbrace_index)` only when there are no nested `{` tokens
-    /// (i.e. the initializer is flat).  Returns `None` when a nested `{` is
-    /// found, so callers fall back to normal block formatting.
+    /// Returns `Some(rbrace_index)` only when the initializer is flat (no
+    /// nested `{`) and written on a single source line (no `Newline` tokens).
+    /// Returns `None` for multi-line or nested initializers so that the source
+    /// grouping is preserved instead of being blown out one-element-per-line.
     fn large_flat_initializer_end(&self) -> Option<usize> {
         for (offset, tk) in self.tokens[self.pos..].iter().enumerate() {
             match tk.kind {
-                TokenKind::LBrace => return None,
+                TokenKind::LBrace | TokenKind::Newline => return None,
                 TokenKind::RBrace => return Some(self.pos + offset),
                 _ => {}
             }
@@ -1786,18 +1787,26 @@ pub fn format<'src>(tokens: &[Token<'src>], config: &Config) -> Result<String, F
     Ok(output)
 }
 
-/// Returns the byte index of the `//` that starts a trailing inline comment on
-/// `line`, or `None` if the line has no trailing comment (standalone comment
-/// lines and blank lines also return `None`).
+/// Returns the byte index of the `//` or `/*` that starts a trailing inline
+/// comment on `line`, or `None` if the line has no trailing comment (standalone
+/// comment lines and blank lines also return `None`).
 fn trailing_comment_col(line: &str) -> Option<usize> {
     let trimmed = line.trim_start();
-    if trimmed.is_empty() || trimmed.starts_with("//") {
+    if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("/*") {
         return None;
     }
     let bytes = line.as_bytes();
     let mut i = 0;
     while i + 1 < bytes.len() {
-        if bytes[i] == b'/' && bytes[i + 1] == b'/' {
+        if bytes[i] == b'/' && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            // Skip /**< — those are Doxygen member comments handled by their own pass.
+            if bytes[i + 1] == b'*'
+                && bytes.get(i + 2) == Some(&b'*')
+                && bytes.get(i + 3) == Some(&b'<')
+            {
+                i += 1;
+                continue;
+            }
             let before = &line[..i];
             if before.bytes().any(|b| b != b' ' && b != b'\t') {
                 return Some(i);
@@ -3016,11 +3025,39 @@ mod tests {
     }
 
     #[test]
-    fn align_trailing_comments_off_by_default() {
-        let src = "struct Foo { int x; // a\nlong long_field; // bb\n};\n";
-        let out = fmt(src); // default config — no alignment
+    fn align_trailing_comments_block_comment_style() {
+        // /* */ inline block comments should be aligned the same as // comments.
+        let src = "int a; /* short */\nlong long_field; /* longer */\n";
+        let out = fmt_with(src, &cfg_align(1));
         let positions: Vec<usize> = out.lines().filter_map(trailing_comment_col).collect();
-        // With alignment off the two positions need not be equal.
+        assert_eq!(
+            positions.len(),
+            2,
+            "expected 2 inline /* */ comments:\n{out}"
+        );
+        assert_eq!(
+            positions[0], positions[1],
+            "/* */ trailing comments must be column-aligned:\n{out}"
+        );
+    }
+
+    #[test]
+    fn align_trailing_comments_doxygen_not_treated_as_regular() {
+        // /**< Doxygen member comments must not be picked up by trailing_comment_col
+        // (they have their own alignment pass).
+        let src = "int x; /**< x */\nlong yy; /**< yy */\n";
+        let positions: Vec<usize> = src.lines().filter_map(trailing_comment_col).collect();
+        assert!(
+            positions.is_empty(),
+            "/**< must not be detected as a regular trailing comment:\n{src}"
+        );
+    }
+
+    #[test]
+    fn align_trailing_comments_off_when_span_zero() {
+        let src = "struct Foo { int x; // a\nlong long_field; // bb\n};\n";
+        let out = fmt_with(src, &cfg_align(0));
+        let positions: Vec<usize> = out.lines().filter_map(trailing_comment_col).collect();
         assert_eq!(
             positions.len(),
             2,
@@ -3028,7 +3065,7 @@ mod tests {
         );
         assert_ne!(
             positions[0], positions[1],
-            "comments should NOT be aligned when feature is off:\n{out}"
+            "comments should NOT be aligned when span=0:\n{out}"
         );
     }
 

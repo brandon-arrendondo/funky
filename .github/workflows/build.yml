@@ -78,7 +78,7 @@ jobs:
         run: ${{ matrix.funky_binary }} --version
 
       - name: Install cargo-about
-        run: cargo install cargo-about --locked
+        run: cargo install cargo-about --features cli
 
       - name: Generate Third-Party Licenses
         shell: bash

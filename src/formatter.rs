@@ -1282,6 +1282,16 @@ impl<'src> Fmt<'src> {
                                 continue;
                             }
                         }
+                        // extern "C" { } is a linkage specification, not a function
+                        // body. The { always stays on the same line regardless of
+                        // brace style or fn_brace_newline.
+                        BraceCtx::ExternC => {
+                            if self.at_line_start {
+                                self.trim_to_prev_line_end();
+                            }
+                            self.space();
+                            self.write("{");
+                        }
                         _ => match self.config.braces.style {
                             BraceStyle::Allman => {
                                 self.ensure_own_line();
@@ -1292,8 +1302,7 @@ impl<'src> Fmt<'src> {
                                 // their own line even in KR mode.  Control-flow
                                 // constructs (if/for/while/switch) always stay on the
                                 // same line.
-                                let fn_newline = (ctx == BraceCtx::Function
-                                    || ctx == BraceCtx::ExternC)
+                                let fn_newline = ctx == BraceCtx::Function
                                     && self.config.braces.fn_brace_newline
                                     && !self.rparen_closes_ctrl_flow();
                                 if fn_newline {
@@ -2824,21 +2833,33 @@ mod tests {
     }
 
     #[test]
-    fn extern_c_brace_newline_respects_fn_brace_newline() {
-        // fn_brace_newline=true (default) must put the { on its own line for extern "C".
+    fn extern_c_brace_always_same_line() {
+        // extern "C" is a linkage specification, not a function body.
+        // The { must stay on the same line regardless of fn_brace_newline or brace style.
         let src = "extern \"C\" {\nint foo(void);\n}\n";
+
         let out = fmt(src);
         assert!(
-            out.contains("extern \"C\"\n{"),
-            "extern \"C\" {{ should be split to own line when fn_brace_newline=true, got:\n{out}"
+            out.contains("extern \"C\" {"),
+            "extern \"C\" {{ must stay on same line with default config, got:\n{out}"
         );
-        // fn_brace_newline=false: { stays on same line.
+
+        // fn_brace_newline=false: still same line
         let mut cfg = Config::default();
         cfg.braces.fn_brace_newline = false;
         let out2 = fmt_with(src, &cfg);
         assert!(
             out2.contains("extern \"C\" {"),
-            "extern \"C\" {{ should stay on same line when fn_brace_newline=false, got:\n{out2}"
+            "extern \"C\" {{ must stay on same line when fn_brace_newline=false, got:\n{out2}"
+        );
+
+        // Allman brace style: extern "C" still same line
+        let mut cfg3 = Config::default();
+        cfg3.braces.style = BraceStyle::Allman;
+        let out3 = fmt_with(src, &cfg3);
+        assert!(
+            out3.contains("extern \"C\" {"),
+            "extern \"C\" {{ must stay on same line even in Allman mode, got:\n{out3}"
         );
     }
 

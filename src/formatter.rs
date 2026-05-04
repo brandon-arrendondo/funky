@@ -227,7 +227,7 @@ impl<'src> Fmt<'src> {
     // ── Inline-comment detection ──────────────────────────────────────────────
 
     /// True if the next token (skipping only `Whitespace`, not `Newline`) is a
-    /// `CommentLine` whose source line matches `source_line`.
+    /// `CommentLine` or `CommentBlock` whose source line matches `source_line`.
     fn peek_inline_comment(&self, source_line: u32) -> bool {
         let mut i = self.pos;
         while i < self.tokens.len() && self.tokens[i].kind == TokenKind::Whitespace {
@@ -235,7 +235,8 @@ impl<'src> Fmt<'src> {
         }
         matches!(
             self.tokens.get(i),
-            Some(t) if t.kind == TokenKind::CommentLine && t.span.line == source_line
+            Some(t) if matches!(t.kind, TokenKind::CommentLine | TokenKind::CommentBlock)
+                && t.span.line == source_line
         )
     }
 
@@ -1512,6 +1513,16 @@ mod tests {
         assert!(
             out.contains("alignof(int)"),
             "alignof should not get space before paren: {out}"
+        );
+    }
+
+    #[test]
+    fn block_comment_after_closing_brace_stays_on_same_line() {
+        let src = "extern \"C\" {\nint f();\n} /* extern \"C\" */\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("} /* extern \"C\" */"),
+            "trailing block comment should stay on same line as closing brace, got:\n{out}"
         );
     }
 }

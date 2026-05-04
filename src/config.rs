@@ -152,7 +152,7 @@ impl Default for SpacingConfig {
             space_inside_parens: false,
             space_inside_brackets: false,
             space_after_cast: false,
-            pointer_align: PointerAlign::Middle,
+            pointer_align: PointerAlign::Name,
             space_inside_angle_brackets: false,
             align_right_cmt_span: 0,
             align_enum_equ_span: 0,
@@ -197,7 +197,7 @@ impl Default for NewlineConfig {
             style: NewlineStyle::Lf,
             max_blank_lines: 2,
             final_newline: true,
-            blank_line_after_var_decl_block: false,
+            blank_line_after_var_decl_block: true,
         }
     }
 }

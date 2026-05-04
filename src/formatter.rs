@@ -620,7 +620,6 @@ impl<'src> Fmt<'src> {
                     | TokenKind::CaretEq
                     | TokenKind::LtLtEq
                     | TokenKind::GtGtEq
-                    | TokenKind::Comma    // argument list: foo(a, b * c)
             ) || (before == TokenKind::Keyword
                 && matches!(self.tokens[b].lexeme, "return" | "case" | "throw"))
                 // `(` preceded by an expression op means we're in an expression subgroup
@@ -1909,9 +1908,18 @@ mod tests {
 
     #[test]
     fn pointer_align_middle() {
-        // default: int * p
+        // explicit middle config: int * p
         let src = "int*p;";
-        let out = fmt(src);
+        let out = fmt_with(
+            src,
+            &Config {
+                spacing: SpacingConfig {
+                    pointer_align: PointerAlign::Middle,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
         assert!(out.contains("int * p"), "middle mode: got\n{out}");
     }
 
@@ -2160,13 +2168,13 @@ mod tests {
     }
 
     #[test]
-    fn var_decl_block_off_by_default() {
-        // Feature is off by default — no blank line inserted.
+    fn var_decl_block_on_by_default() {
+        // Feature is on by default — blank line is inserted.
         let src = "void f() {\n    int x = 1;\n    foo(x);\n}\n";
-        let out = fmt(src); // default config, feature disabled
+        let out = fmt(src);
         assert!(
-            !out.contains("1;\n\n"),
-            "blank line must not appear when feature is off: {out}"
+            out.contains("1;\n\n"),
+            "blank line must appear after var decl block by default: {out}"
         );
     }
 

@@ -665,12 +665,12 @@ mod tests {
     use crate::lexer::tokenize;
 
     fn fmt(src: &str) -> String {
-        let tokens = tokenize(src, "<test>").unwrap();
+        let (tokens, _) = tokenize(src, "<test>").unwrap();
         format(&tokens, &Config::default()).unwrap()
     }
 
     fn fmt_with(src: &str, config: &Config) -> String {
-        let tokens = tokenize(src, "<test>").unwrap();
+        let (tokens, _) = tokenize(src, "<test>").unwrap();
         format(&tokens, config).unwrap()
     }
 

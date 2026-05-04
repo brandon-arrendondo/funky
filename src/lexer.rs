@@ -135,6 +135,7 @@ fn is_char_prefix(s: &str) -> bool {
 pub struct Lexer<'src> {
     cursor: Cursor<'src>,
     filename: String,
+    warnings: Vec<FunkyError>,
 }
 
 impl<'src> Lexer<'src> {
@@ -142,10 +143,11 @@ impl<'src> Lexer<'src> {
         Self {
             cursor: Cursor::new(src),
             filename: filename.into(),
+            warnings: Vec::new(),
         }
     }
 
-    pub fn tokenize(mut self) -> Result<Vec<Token<'src>>, FunkyError> {
+    pub fn tokenize(mut self) -> Result<(Vec<Token<'src>>, Vec<FunkyError>), FunkyError> {
         let mut tokens = Vec::new();
         loop {
             let tok = self.next_token()?;
@@ -155,7 +157,7 @@ impl<'src> Lexer<'src> {
                 break;
             }
         }
-        Ok(tokens)
+        Ok((tokens, self.warnings))
     }
 
     fn make(&self, kind: TokenKind, start_byte: usize, line: u32, col: u32) -> Token<'src> {
@@ -435,11 +437,13 @@ impl<'src> Lexer<'src> {
             }
 
             other => {
-                return Err(self.lex_err(
+                let warn = self.lex_err(
                     format!("unexpected character U+{:04X} {:?}", other as u32, other),
                     line,
                     col,
-                ))
+                );
+                self.warnings.push(warn);
+                TokenKind::Unknown
             }
         };
 
@@ -685,7 +689,7 @@ impl<'src> Lexer<'src> {
 pub fn tokenize<'src>(
     src: &'src str,
     filename: impl Into<String>,
-) -> Result<Vec<Token<'src>>, FunkyError> {
+) -> Result<(Vec<Token<'src>>, Vec<FunkyError>), FunkyError> {
     Lexer::new(src, filename).tokenize()
 }
 
@@ -697,8 +701,8 @@ mod tests {
     use crate::token::TokenKind::*;
 
     fn kinds(src: &str) -> Vec<TokenKind> {
-        tokenize(src, "<test>")
-            .unwrap()
+        let (tokens, _) = tokenize(src, "<test>").unwrap();
+        tokens
             .into_iter()
             .filter(|t| !matches!(t.kind, Whitespace | Newline | Eof))
             .map(|t| t.kind)
@@ -714,7 +718,7 @@ mod tests {
     #[test]
     fn chinese_comment() {
         let src = "int x; // 变量定义\nint y;";
-        let toks = tokenize(src, "<test>").unwrap();
+        let (toks, _) = tokenize(src, "<test>").unwrap();
         let comment = toks.iter().find(|t| t.kind == CommentLine).unwrap();
         assert!(comment.lexeme.contains("变量定义"));
     }
@@ -722,7 +726,7 @@ mod tests {
     #[test]
     fn block_comment_unicode() {
         let src = "/* 这是注释 */ int x;";
-        let toks = tokenize(src, "<test>").unwrap();
+        let (toks, _) = tokenize(src, "<test>").unwrap();
         let comment = toks.iter().find(|t| t.kind == CommentBlock).unwrap();
         assert!(comment.lexeme.contains("这是注释"));
     }
@@ -756,7 +760,7 @@ mod tests {
     #[test]
     fn preproc_include() {
         let src = "#include <stdio.h>\nint main() {}";
-        let toks = tokenize(src, "<test>").unwrap();
+        let (toks, _) = tokenize(src, "<test>").unwrap();
         assert_eq!(toks[0].kind, PreprocLine);
         assert!(toks[0].lexeme.contains("stdio.h"));
     }
@@ -764,7 +768,7 @@ mod tests {
     #[test]
     fn multiline_preproc() {
         let src = "#define FOO \\\n    (1 + 2)\n";
-        let toks = tokenize(src, "<test>").unwrap();
+        let (toks, _) = tokenize(src, "<test>").unwrap();
         assert_eq!(toks[0].kind, PreprocLine);
         assert!(toks[0].lexeme.contains("FOO"));
     }
@@ -791,5 +795,20 @@ mod tests {
     fn spaceship() {
         let k = kinds("a <=> b");
         assert_eq!(k, [Ident, LtEqGt, Ident]);
+    }
+
+    #[test]
+    fn unknown_char_recovery() {
+        // `@` is not a C/C++ token; the lexer should emit Unknown and continue.
+        let (tokens, warnings) = tokenize("int @x;", "<test>").unwrap();
+        let k: Vec<_> = tokens
+            .iter()
+            .filter(|t| !matches!(t.kind, Whitespace | Newline | Eof))
+            .map(|t| t.kind)
+            .collect();
+        assert_eq!(k, [Keyword, Unknown, Ident, Semi]);
+        assert_eq!(warnings.len(), 1);
+        let msg = warnings[0].to_string();
+        assert!(msg.contains("U+0040"), "expected U+0040 in warning: {msg}");
     }
 }

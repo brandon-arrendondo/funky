@@ -1809,7 +1809,7 @@ pub fn format<'src>(tokens: &[Token<'src>], config: &Config) -> Result<String, F
     let output = Fmt::new(config, tokens).format()?;
     let nl = config.newline_str();
     let output = if config.spacing.align_right_cmt_span > 0 {
-        align_trailing_comments(&output, nl)
+        align_trailing_comments(&output, nl, config.spacing.align_right_cmt_gap.max(1))
     } else {
         output
     };
@@ -1858,7 +1858,8 @@ fn trailing_comment_col(line: &str) -> Option<usize> {
 
 /// Align trailing `//` comments within groups of consecutive lines that all
 /// carry a trailing comment.  Each group is aligned to the widest code column.
-fn align_trailing_comments(output: &str, nl: &str) -> String {
+/// `min_gap` is the minimum number of spaces between code end and comment.
+fn align_trailing_comments(output: &str, nl: &str, min_gap: usize) -> String {
     let lines: Vec<&str> = output.split(nl).collect();
     let n = lines.len();
     let cols: Vec<Option<usize>> = lines.iter().map(|l| trailing_comment_col(l)).collect();
@@ -1874,12 +1875,12 @@ fn align_trailing_comments(output: &str, nl: &str) -> String {
             // Group is lines[i..j]; align if 2+ lines.
             if j > i + 1 {
                 // Find widest code (trimmed) length across the group; comments
-                // align at max_code_len + 1 (always at least one space gap).
+                // align at max_code_len + min_gap.
                 let max_code_len = (i..j)
                     .map(|k| lines[k][..cols[k].unwrap()].trim_end().len())
                     .max()
                     .unwrap();
-                let target = max_code_len + 1;
+                let target = max_code_len + min_gap;
                 for k in i..j {
                     let col = cols[k].unwrap();
                     let code = lines[k][..col].trim_end();
@@ -2251,12 +2252,16 @@ mod tests {
     fn large_initializer_inline_comment_stays_on_same_line() {
         let src = "int a[9] = {0, // zero\n1, // one\n2, 3, 4, 5, 6, 7, 8};\n";
         let out = fmt(src);
+        // Comments must remain on the same line as the element (not split off);
+        // exact spacing may vary based on align_right_cmt_gap.
         assert!(
-            out.contains("0, // zero\n"),
+            out.lines()
+                .any(|l| l.contains("0,") && l.contains("// zero")),
             "inline comment after element must stay on same line, got:\n{out}"
         );
         assert!(
-            out.contains("1, // one\n"),
+            out.lines()
+                .any(|l| l.contains("1,") && l.contains("// one")),
             "inline comment after second element must stay on same line, got:\n{out}"
         );
     }

@@ -148,6 +148,9 @@ pub struct SpacingConfig {
     /// Align trailing `//` comments across consecutive lines that all carry a
     /// trailing comment.  0 = disabled; any positive value enables alignment.
     pub align_right_cmt_span: usize,
+    /// Minimum number of spaces between code and an aligned trailing comment.
+    /// Defaults to 1; increase to 2 or 3 to match uncrustify-style wider gaps.
+    pub align_right_cmt_gap: usize,
     /// Align `=` signs across consecutive enum value lines.
     /// 0 = disabled; any positive value enables alignment.
     pub align_enum_equ_span: usize,
@@ -169,6 +172,7 @@ impl Default for SpacingConfig {
             pointer_align: PointerAlign::Name,
             space_inside_angle_brackets: false,
             align_right_cmt_span: 3,
+            align_right_cmt_gap: 3,
             align_enum_equ_span: 1,
             align_doxygen_cmt_span: 1,
         }
@@ -267,6 +271,7 @@ space_after_cast           = false
 pointer_align              = "middle"
 space_inside_angle_brackets = false
 align_right_cmt_span       = 3
+align_right_cmt_gap        = 3
 align_enum_equ_span        = 1
 align_doxygen_cmt_span     = 1
 

@@ -1459,7 +1459,75 @@ impl<'src> Fmt<'src> {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 pub fn format<'src>(tokens: &[Token<'src>], config: &Config) -> Result<String, FunkyError> {
-    Fmt::new(config, tokens).format()
+    let output = Fmt::new(config, tokens).format()?;
+    if config.spacing.align_right_cmt_span > 0 {
+        Ok(align_trailing_comments(&output, config.newline_str()))
+    } else {
+        Ok(output)
+    }
+}
+
+/// Returns the byte index of the `//` that starts a trailing inline comment on
+/// `line`, or `None` if the line has no trailing comment (standalone comment
+/// lines and blank lines also return `None`).
+fn trailing_comment_col(line: &str) -> Option<usize> {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() || trimmed.starts_with("//") {
+        return None;
+    }
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            let before = &line[..i];
+            if before.bytes().any(|b| b != b' ' && b != b'\t') {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Align trailing `//` comments within groups of consecutive lines that all
+/// carry a trailing comment.  Each group is aligned to the widest code column.
+fn align_trailing_comments(output: &str, nl: &str) -> String {
+    let lines: Vec<&str> = output.split(nl).collect();
+    let n = lines.len();
+    let cols: Vec<Option<usize>> = lines.iter().map(|l| trailing_comment_col(l)).collect();
+    let mut result: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+
+    let mut i = 0;
+    while i < n {
+        if cols[i].is_some() {
+            let mut j = i + 1;
+            while j < n && cols[j].is_some() {
+                j += 1;
+            }
+            // Group is lines[i..j]; align if 2+ lines.
+            if j > i + 1 {
+                // Find widest code (trimmed) length across the group; comments
+                // align at max_code_len + 1 (always at least one space gap).
+                let max_code_len = (i..j)
+                    .map(|k| lines[k][..cols[k].unwrap()].trim_end().len())
+                    .max()
+                    .unwrap();
+                let target = max_code_len + 1;
+                for k in i..j {
+                    let col = cols[k].unwrap();
+                    let code = lines[k][..col].trim_end();
+                    let comment = &lines[k][col..];
+                    let pad = target - code.len();
+                    result[k] = format!("{}{}{}", code, " ".repeat(pad), comment);
+                }
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+
+    result.join(nl)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -1467,6 +1535,7 @@ pub fn format<'src>(tokens: &[Token<'src>], config: &Config) -> Result<String, F
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::SpacingConfig;
     use crate::lexer::tokenize;
 
     fn fmt(src: &str) -> String {
@@ -2237,5 +2306,60 @@ mod tests {
             out.contains(" */") && !out.contains("  */"),
             "already-correct */ must not be double-spaced, got:\n{out}"
         );
+    }
+
+    fn cfg_align(span: usize) -> Config {
+        Config {
+            spacing: SpacingConfig {
+                align_right_cmt_span: span,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn align_trailing_comments_struct() {
+        let src =
+            "struct Foo { int x; // short\nlong long_field; // longer\nchar c; // another\n};\n";
+        let out = fmt_with(src, &cfg_align(1));
+        // All three `//` should start at the same column.
+        let positions: Vec<usize> = out.lines().filter_map(trailing_comment_col).collect();
+        assert_eq!(
+            positions.len(),
+            3,
+            "expected 3 inline comments, got:\n{out}"
+        );
+        assert!(
+            positions.iter().all(|&c| c == positions[0]),
+            "trailing comments not aligned: columns={positions:?}\n{out}"
+        );
+    }
+
+    #[test]
+    fn align_trailing_comments_off_by_default() {
+        let src = "struct Foo { int x; // a\nlong long_field; // bb\n};\n";
+        let out = fmt(src); // default config — no alignment
+        let positions: Vec<usize> = out.lines().filter_map(trailing_comment_col).collect();
+        // With alignment off the two positions need not be equal.
+        assert_eq!(
+            positions.len(),
+            2,
+            "expected 2 inline comments, got:\n{out}"
+        );
+        assert_ne!(
+            positions[0], positions[1],
+            "comments should NOT be aligned when feature is off:\n{out}"
+        );
+    }
+
+    #[test]
+    fn align_trailing_comments_blank_line_breaks_group() {
+        let src = "int a; // g1\nint b; // g1\n\nint c; // g2\n";
+        let out = fmt_with(src, &cfg_align(1));
+        let cols: Vec<usize> = out.lines().filter_map(trailing_comment_col).collect();
+        assert_eq!(cols.len(), 3, "expected 3 inline comments, got:\n{out}");
+        // First two should be aligned (same group); third may differ.
+        assert_eq!(cols[0], cols[1], "group-1 comments not aligned:\n{out}");
     }
 }

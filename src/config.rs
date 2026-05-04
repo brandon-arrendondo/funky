@@ -134,6 +134,9 @@ pub struct SpacingConfig {
     pub space_after_cast: bool,
     pub pointer_align: PointerAlign,
     pub space_inside_angle_brackets: bool,
+    /// Align trailing `//` comments across consecutive lines that all carry a
+    /// trailing comment.  0 = disabled; any positive value enables alignment.
+    pub align_right_cmt_span: usize,
 }
 
 impl Default for SpacingConfig {
@@ -148,6 +151,7 @@ impl Default for SpacingConfig {
             space_after_cast: false,
             pointer_align: PointerAlign::Middle,
             space_inside_angle_brackets: false,
+            align_right_cmt_span: 0,
         }
     }
 }
@@ -231,6 +235,7 @@ space_inside_brackets      = false
 space_after_cast           = false
 pointer_align              = "middle"
 space_inside_angle_brackets = false
+align_right_cmt_span       = 0
 
 [newlines]
 style           = "lf"

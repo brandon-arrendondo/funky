@@ -1,0 +1,383 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*.*.*'
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: Build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            artifact_name: funky-linux-x64
+            funky_binary: target/release/funky
+          - os: windows-2022
+            artifact_name: funky-windows-x64
+            funky_binary: target/release/funky.exe
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Extracted version: $VERSION"
+        shell: bash
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify Rust installation
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Security Audit - Check Dependencies
+        run: |
+          cargo install cargo-audit
+          cargo audit
+        continue-on-error: true
+
+      - name: Build Release Binary
+        run: cargo build --release
+
+      - name: Run Tests
+        run: cargo test --release
+
+      - name: Verify Binary
+        run: ${{ matrix.funky_binary }} --version
+
+      - name: Install cargo-about
+        run: cargo install cargo-about --locked
+
+      - name: Generate Third-Party Licenses
+        shell: bash
+        run: cargo about generate about.hbs -o THIRD_PARTY_LICENSES.txt
+
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+
+      - name: Generate SBOM (CycloneDX)
+        shell: bash
+        run: cargo cyclonedx --format json --spec-version 1.5
+
+      - name: List Build Output (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          echo "=== Build Artifacts ==="
+          ls -lh ${{ matrix.funky_binary }}
+
+      - name: List Build Output (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          Write-Host "=== Build Artifacts ==="
+          if (Test-Path "${{ matrix.funky_binary }}") {
+            Get-Item "${{ matrix.funky_binary }}" | Format-List Name, Length, LastWriteTime
+          } else {
+            Write-Host "Binary not found"
+          }
+        shell: pwsh
+
+      - name: Stage Artifacts (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          ARTIFACT_DIR="artifacts/${{ matrix.artifact_name }}-${VERSION}"
+          mkdir -p "${ARTIFACT_DIR}"
+          cp ${{ matrix.funky_binary }} "${ARTIFACT_DIR}/"
+          cp README.md "${ARTIFACT_DIR}/" 2>/dev/null || true
+          cp LICENSE "${ARTIFACT_DIR}/" 2>/dev/null || true
+          cp THIRD_PARTY_LICENSES.txt "${ARTIFACT_DIR}/"
+          cp funky.cdx.json "${ARTIFACT_DIR}/"
+          echo "=== Artifacts staged ==="
+          ls -lhR "${ARTIFACT_DIR}/"
+          echo "ARTIFACT_DIR=${ARTIFACT_DIR}" >> $GITHUB_ENV
+
+      - name: Stage Artifacts (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $VERSION = "${{ steps.version.outputs.VERSION }}"
+          $ARTIFACT_DIR = "artifacts/${{ matrix.artifact_name }}-${VERSION}"
+          New-Item -ItemType Directory -Force -Path $ARTIFACT_DIR
+          Copy-Item "${{ matrix.funky_binary }}" -Destination $ARTIFACT_DIR
+          Copy-Item "README.md" -Destination $ARTIFACT_DIR -ErrorAction SilentlyContinue
+          Copy-Item "LICENSE" -Destination $ARTIFACT_DIR -ErrorAction SilentlyContinue
+          Copy-Item "THIRD_PARTY_LICENSES.txt" -Destination $ARTIFACT_DIR
+          Copy-Item "funky.cdx.json" -Destination $ARTIFACT_DIR
+          Write-Host "=== Artifacts staged ==="
+          Get-ChildItem $ARTIFACT_DIR
+          echo "ARTIFACT_DIR=${ARTIFACT_DIR}" >> $env:GITHUB_ENV
+        shell: pwsh
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}-${{ steps.version.outputs.VERSION }}
+          path: ${{ env.ARTIFACT_DIR }}
+          retention-days: 30
+
+  package:
+    name: Package Release
+    needs: build
+    runs-on: ubuntu-22.04
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Extracted version: $VERSION"
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm libfuse2
+
+      - name: Download Linux Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: funky-linux-x64-${{ steps.version.outputs.VERSION }}
+          path: artifacts/funky-linux-x64-${{ steps.version.outputs.VERSION }}
+
+      - name: Download Windows Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: funky-windows-x64-${{ steps.version.outputs.VERSION }}
+          path: artifacts/funky-windows-x64-${{ steps.version.outputs.VERSION }}
+
+      - name: Verify Release Package
+        run: |
+          echo "=== Downloaded Artifacts ==="
+          ls -lR artifacts/
+          echo ""
+          echo "Release package ready with version: ${{ steps.version.outputs.VERSION }}"
+
+      - name: Create Release Archive (Linux)
+        run: |
+          cd artifacts
+          tar -czf funky-linux-x64-${{ steps.version.outputs.VERSION }}.tar.gz funky-linux-x64-${{ steps.version.outputs.VERSION }}
+          cd ..
+
+      - name: Create Release Archive (Windows)
+        run: |
+          cd artifacts
+          zip -r funky-windows-x64-${{ steps.version.outputs.VERSION }}.zip funky-windows-x64-${{ steps.version.outputs.VERSION }}
+          cd ..
+
+      - name: Build deb package
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          PKG_DIR="funky_${VERSION}_amd64"
+          mkdir -p "${PKG_DIR}/DEBIAN"
+          mkdir -p "${PKG_DIR}/usr/bin"
+          mkdir -p "${PKG_DIR}/usr/share/doc/funky"
+
+          # Control file
+          cat > "${PKG_DIR}/DEBIAN/control" << EOF
+          Package: funky
+          Version: ${VERSION}
+          Section: devel
+          Priority: optional
+          Architecture: amd64
+          Maintainer: Brandon Arrendondo <brandon.arrendondo@bissell.com>
+          Homepage: https://github.com/brandon-arrendondo/funky
+          Description: C/C++ code formatter with Unicode support
+           A fast C/C++ code formatter with Unicode support (Chinese comments, etc.)
+           configured via funky.toml. Handles all standard C/C++ token types,
+           multiple brace styles (K&R, Allman, Stroustrup), and preserves
+           preprocessor directives verbatim.
+          EOF
+          # Remove leading whitespace from control file (heredoc indentation)
+          sed -i 's/^          //' "${PKG_DIR}/DEBIAN/control"
+
+          # Binary
+          cp "artifacts/funky-linux-x64-${VERSION}/funky" "${PKG_DIR}/usr/bin/"
+          chmod 755 "${PKG_DIR}/usr/bin/funky"
+
+          # Docs
+          cp README.md "${PKG_DIR}/usr/share/doc/funky/"
+          cp LICENSE "${PKG_DIR}/usr/share/doc/funky/copyright"
+          cp "artifacts/funky-linux-x64-${VERSION}/THIRD_PARTY_LICENSES.txt" \
+             "${PKG_DIR}/usr/share/doc/funky/"
+          cp "artifacts/funky-linux-x64-${VERSION}/funky.cdx.json" \
+             "${PKG_DIR}/usr/share/doc/funky/"
+
+          dpkg-deb --build --root-owner-group "${PKG_DIR}"
+          mv "${PKG_DIR}.deb" "artifacts/"
+          echo "=== deb package ==="
+          dpkg-deb --info "artifacts/${PKG_DIR}.deb"
+
+      - name: Build rpm package
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+
+          mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+
+          # Create tarball for rpmbuild
+          TARDIR="funky-${VERSION}"
+          mkdir -p "${TARDIR}/bin"
+          mkdir -p "${TARDIR}/doc"
+          cp "artifacts/funky-linux-x64-${VERSION}/funky" "${TARDIR}/bin/"
+          cp README.md "${TARDIR}/doc/"
+          cp LICENSE "${TARDIR}/doc/"
+          cp "artifacts/funky-linux-x64-${VERSION}/THIRD_PARTY_LICENSES.txt" "${TARDIR}/doc/"
+          cp "artifacts/funky-linux-x64-${VERSION}/funky.cdx.json" "${TARDIR}/doc/"
+          tar -czf "rpmbuild/SOURCES/funky-${VERSION}.tar.gz" "${TARDIR}"
+          rm -rf "${TARDIR}"
+
+          # Spec file
+          cat > rpmbuild/SPECS/funky.spec << 'SPEC_EOF'
+          Name:           funky
+          Version:        VERSION_PLACEHOLDER
+          Release:        1%{?dist}
+          Summary:        C/C++ code formatter with Unicode support
+          License:        MIT
+          URL:            https://github.com/brandon-arrendondo/funky
+          Source0:        %{name}-%{version}.tar.gz
+
+          %description
+          A fast C/C++ code formatter with Unicode support (Chinese comments, etc.)
+          configured via funky.toml. Handles all standard C/C++ token types,
+          multiple brace styles (K&R, Allman, Stroustrup), and preserves
+          preprocessor directives verbatim.
+
+          %prep
+          %setup -q
+
+          %install
+          mkdir -p %{buildroot}%{_bindir}
+          mkdir -p %{buildroot}%{_docdir}/%{name}
+          install -m 755 bin/funky %{buildroot}%{_bindir}/funky
+          install -m 644 doc/README.md %{buildroot}%{_docdir}/%{name}/README.md
+          install -m 644 doc/LICENSE %{buildroot}%{_docdir}/%{name}/LICENSE
+          install -m 644 doc/THIRD_PARTY_LICENSES.txt %{buildroot}%{_docdir}/%{name}/THIRD_PARTY_LICENSES.txt
+          install -m 644 doc/funky.cdx.json %{buildroot}%{_docdir}/%{name}/funky.cdx.json
+
+          %files
+          %{_bindir}/funky
+          %doc %{_docdir}/%{name}/README.md
+          %doc %{_docdir}/%{name}/THIRD_PARTY_LICENSES.txt
+          %doc %{_docdir}/%{name}/funky.cdx.json
+          %license %{_docdir}/%{name}/LICENSE
+          SPEC_EOF
+
+          # Fix indentation and substitute version
+          sed -i 's/^          //' rpmbuild/SPECS/funky.spec
+          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/" rpmbuild/SPECS/funky.spec
+
+          rpmbuild --define "_topdir $(pwd)/rpmbuild" -bb rpmbuild/SPECS/funky.spec
+          cp rpmbuild/RPMS/x86_64/funky-*.rpm artifacts/
+          echo "=== rpm package ==="
+          rpm -qip artifacts/funky-*.rpm
+
+      - name: Build AppImage
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+
+          # Download appimagetool
+          curl -Lo appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+
+          # Create AppDir structure
+          APPDIR="funky.AppDir"
+          mkdir -p "${APPDIR}/usr/bin"
+          mkdir -p "${APPDIR}/usr/share/icons/hicolor/256x256/apps"
+
+          # Binary
+          cp "artifacts/funky-linux-x64-${VERSION}/funky" "${APPDIR}/usr/bin/"
+          chmod 755 "${APPDIR}/usr/bin/funky"
+
+          # License docs
+          mkdir -p "${APPDIR}/usr/share/doc/funky"
+          cp LICENSE "${APPDIR}/usr/share/doc/funky/"
+          cp "artifacts/funky-linux-x64-${VERSION}/THIRD_PARTY_LICENSES.txt" \
+             "${APPDIR}/usr/share/doc/funky/"
+          cp "artifacts/funky-linux-x64-${VERSION}/funky.cdx.json" \
+             "${APPDIR}/usr/share/doc/funky/"
+
+          # Desktop entry
+          cat > "${APPDIR}/funky.desktop" << EOF
+          [Desktop Entry]
+          Type=Application
+          Name=funky
+          Exec=funky
+          Icon=funky
+          Comment=C/C++ code formatter
+          Categories=Development;
+          Terminal=true
+          NoDisplay=true
+          EOF
+          sed -i 's/^          //' "${APPDIR}/funky.desktop"
+
+          # Icon
+          cat > "${APPDIR}/funky.svg" << 'SVG_EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+            <rect width="256" height="256" rx="32" fill="#2d3748"/>
+            <text x="128" y="160" font-family="monospace" font-size="120" font-weight="bold" fill="#e2e8f0" text-anchor="middle">F</text>
+          </svg>
+          SVG_EOF
+          sed -i 's/^          //' "${APPDIR}/funky.svg"
+          cp "${APPDIR}/funky.svg" "${APPDIR}/usr/share/icons/hicolor/256x256/apps/"
+
+          # AppRun
+          cat > "${APPDIR}/AppRun" << 'APPRUN_EOF'
+          #!/bin/bash
+          SELF=$(readlink -f "$0")
+          HERE=${SELF%/*}
+          export PATH="${HERE}/usr/bin:${PATH}"
+          exec "${HERE}/usr/bin/funky" "$@"
+          APPRUN_EOF
+          chmod +x "${APPDIR}/AppRun"
+
+          # Build AppImage
+          ARCH=x86_64 ./appimagetool "${APPDIR}" "artifacts/funky-${VERSION}-x86_64.AppImage"
+          echo "=== AppImage ==="
+          ls -lh "artifacts/funky-${VERSION}-x86_64.AppImage"
+
+      - name: Upload Release Archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-packages-${{ steps.version.outputs.VERSION }}
+          path: |
+            artifacts/*.tar.gz
+            artifacts/*.zip
+            artifacts/*.deb
+            artifacts/*.rpm
+            artifacts/*.AppImage
+          retention-days: 90

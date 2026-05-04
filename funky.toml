@@ -1,0 +1,26 @@
+# funky configuration
+# All keys are optional — defaults shown below.
+
+[indent]
+style = "spaces"   # "spaces" or "tabs"
+width = 4          # spaces per indent level (or tab display width)
+
+[braces]
+style = "kr"       # "kr" (same line), "allman" (own line), "stroustrup"
+cuddle_else  = true
+cuddle_catch = true
+
+[spacing]
+space_before_call_paren    = false  # foo(  vs  foo (
+space_before_keyword_paren = true   # if (  vs  if(
+space_after_comma          = true
+space_around_binary_ops    = true
+space_inside_parens        = false
+space_inside_brackets      = false
+space_after_cast           = false
+pointer_align              = "middle"  # "type" (int* p), "name" (int *p), "middle" (int * p)
+
+[newlines]
+style           = "lf"   # "lf", "crlf", "native"
+max_blank_lines = 2
+final_newline   = true

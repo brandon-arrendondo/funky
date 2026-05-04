@@ -1,4 +1,4 @@
-use crate::config::{BraceStyle, Config};
+use crate::config::{BraceStyle, Config, PointerAlign};
 use crate::error::FunkyError;
 use crate::token::{Token, TokenKind};
 
@@ -44,6 +44,10 @@ struct Fmt<'src> {
     /// Set when `case`/`default` keyword is emitted so the following `:` gets
     /// a newline after it instead of continuing on the same line.
     in_case_label: bool,
+    /// When true, the next call to `space()` is suppressed and the flag is
+    /// cleared. Used to suppress the space between a pointer `*`/`&` and the
+    /// following identifier in `name` pointer-alignment mode.
+    suppress_next_space: bool,
 }
 
 impl<'src> Fmt<'src> {
@@ -64,6 +68,7 @@ impl<'src> Fmt<'src> {
             switch_depth: 0,
             pending_switch: false,
             in_case_label: false,
+            suppress_next_space: false,
         }
     }
 
@@ -114,6 +119,7 @@ impl<'src> Fmt<'src> {
     fn nl(&mut self) {
         self.output.push_str(self.config.newline_str());
         self.at_line_start = true;
+        self.suppress_next_space = false;
     }
 
     fn indent(&mut self) {
@@ -127,6 +133,10 @@ impl<'src> Fmt<'src> {
     }
 
     fn space(&mut self) {
+        if self.suppress_next_space {
+            self.suppress_next_space = false;
+            return;
+        }
         if !self.at_line_start && !self.output.ends_with(' ') {
             self.output.push(' ');
         }
@@ -202,6 +212,31 @@ impl<'src> Fmt<'src> {
             | TokenKind::Colon => BraceCtx::Other,
             _ => BraceCtx::Other,
         }
+    }
+
+    // ── Pointer/reference declarator detection ────────────────────────────────
+
+    /// Heuristic: a `*` or `&` is a declarator (not multiplication/address-of)
+    /// when the preceding non-whitespace token is a definite type-introducing
+    /// token: a type keyword, another `*`/`&` (chained pointers), `)` (cast or
+    /// function-pointer return type), `>` (template instantiation), or
+    /// `typename`/`struct`/`class`/`union`/`enum`.
+    fn is_ptr_decl_context(&self) -> bool {
+        matches!(
+            self.prev,
+            Some(
+                TokenKind::Keyword
+                    | TokenKind::KwStruct
+                    | TokenKind::KwClass
+                    | TokenKind::KwUnion
+                    | TokenKind::KwEnum
+                    | TokenKind::KwTypename
+                    | TokenKind::Star
+                    | TokenKind::Amp
+                    | TokenKind::RParen
+                    | TokenKind::Gt
+            )
+        )
     }
 
     // ── Spacing decision ──────────────────────────────────────────────────────
@@ -624,6 +659,41 @@ impl<'src> Fmt<'src> {
                     self.prev = Some(tok.kind);
                 }
 
+                // ── Pointer / reference declarator ───────────────────────────
+                TokenKind::Star | TokenKind::Amp if self.is_ptr_decl_context() => {
+                    self.flush_blank_lines();
+                    match self.config.spacing.pointer_align {
+                        PointerAlign::Middle => {
+                            // Same as binary-op: space on both sides.
+                            if self.at_line_start {
+                                self.indent();
+                            } else if self.needs_space(tok.kind) {
+                                self.space();
+                            }
+                        }
+                        PointerAlign::Type => {
+                            // Star/amp attached to the type — no space before.
+                            if self.at_line_start {
+                                self.indent();
+                            }
+                            // Deliberately no space() call here.
+                        }
+                        PointerAlign::Name => {
+                            // Star/amp attached to the name — space before (only
+                            // between type and first star; consecutive stars/amps
+                            // stay together), suppress space after.
+                            if self.at_line_start {
+                                self.indent();
+                            } else if !matches!(self.prev, Some(TokenKind::Star | TokenKind::Amp)) {
+                                self.space();
+                            }
+                            self.suppress_next_space = true;
+                        }
+                    }
+                    self.write(tok.lexeme);
+                    self.prev = Some(tok.kind);
+                }
+
                 // ── Everything else ───────────────────────────────────────────
                 _ => {
                     self.flush_blank_lines();
@@ -807,6 +877,90 @@ mod tests {
             out.lines().any(|l| l.starts_with("        y")),
             "case body not indented deeper than label:\n{out}"
         );
+    }
+
+    #[test]
+    fn pointer_align_middle() {
+        // default: int * p
+        let src = "int*p;";
+        let out = fmt(src);
+        assert!(out.contains("int * p"), "middle mode: got\n{out}");
+    }
+
+    #[test]
+    fn pointer_align_type() {
+        use crate::config::{PointerAlign, SpacingConfig};
+        let config = Config {
+            spacing: SpacingConfig {
+                pointer_align: PointerAlign::Type,
+                ..SpacingConfig::default()
+            },
+            ..Config::default()
+        };
+        let src = "int*p;";
+        let out = fmt_with(src, &config);
+        assert!(out.contains("int* p"), "type mode: got\n{out}");
+    }
+
+    #[test]
+    fn pointer_align_name() {
+        use crate::config::{PointerAlign, SpacingConfig};
+        let config = Config {
+            spacing: SpacingConfig {
+                pointer_align: PointerAlign::Name,
+                ..SpacingConfig::default()
+            },
+            ..Config::default()
+        };
+        let src = "int*p;";
+        let out = fmt_with(src, &config);
+        assert!(out.contains("int *p"), "name mode: got\n{out}");
+    }
+
+    #[test]
+    fn pointer_align_double_star_type() {
+        use crate::config::{PointerAlign, SpacingConfig};
+        let config = Config {
+            spacing: SpacingConfig {
+                pointer_align: PointerAlign::Type,
+                ..SpacingConfig::default()
+            },
+            ..Config::default()
+        };
+        let src = "int**p;";
+        let out = fmt_with(src, &config);
+        assert!(out.contains("int** p"), "type double-ptr: got\n{out}");
+    }
+
+    #[test]
+    fn pointer_align_double_star_name() {
+        use crate::config::{PointerAlign, SpacingConfig};
+        let config = Config {
+            spacing: SpacingConfig {
+                pointer_align: PointerAlign::Name,
+                ..SpacingConfig::default()
+            },
+            ..Config::default()
+        };
+        let src = "int**p;";
+        let out = fmt_with(src, &config);
+        assert!(out.contains("int **p"), "name double-ptr: got\n{out}");
+    }
+
+    #[test]
+    fn pointer_align_does_not_affect_multiplication() {
+        // a * b is multiplication — pointer_align=type must not strip its spaces
+        use crate::config::{PointerAlign, SpacingConfig};
+        let config = Config {
+            spacing: SpacingConfig {
+                pointer_align: PointerAlign::Type,
+                ..SpacingConfig::default()
+            },
+            ..Config::default()
+        };
+        let src = "int r=a*b;";
+        let out = fmt_with(src, &config);
+        assert!(out.contains("a * b"), "multiplication spaces: got\n{out}");
     }
 
     #[test]

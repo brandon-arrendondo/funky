@@ -118,6 +118,7 @@ pub struct SpacingConfig {
     pub space_inside_parens: bool,
     pub space_inside_brackets: bool,
     pub space_after_cast: bool,
+    pub pointer_align: PointerAlign,
 }
 
 impl Default for SpacingConfig {
@@ -130,8 +131,26 @@ impl Default for SpacingConfig {
             space_inside_parens: false,
             space_inside_brackets: false,
             space_after_cast: false,
+            pointer_align: PointerAlign::Middle,
         }
     }
+}
+
+/// Controls spacing around `*` and `&` in pointer/reference declarations.
+///
+/// Only applies when the `*`/`&` is detected as a declarator (heuristic:
+/// preceded by a type keyword, another `*`/`&`, or `)` for casts).
+/// Multiplication and dereference are not affected.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PointerAlign {
+    /// `int* p` — star/amp attached to the type.
+    Type,
+    /// `int *p` — star/amp attached to the name.
+    Name,
+    /// `int * p` — star/amp centred between type and name.
+    #[default]
+    Middle,
 }
 
 // ── Newlines ─────────────────────────────────────────────────────────────────
@@ -188,6 +207,7 @@ space_around_binary_ops    = true
 space_inside_parens        = false
 space_inside_brackets      = false
 space_after_cast           = false
+pointer_align              = "middle"
 
 [newlines]
 style           = "lf"

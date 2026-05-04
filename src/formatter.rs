@@ -236,21 +236,30 @@ impl<'src> Fmt<'src> {
 
     // ── Cast detection ────────────────────────────────────────────────────────
 
-    /// True if the next non-whitespace/newline token is a built-in type keyword,
-    /// which strongly suggests the current `(` opens a C-style cast.
+    /// True if the tokens from `self.pos` up to and including a matching `)`
+    /// look like a C-style cast type: optional cv/elaborated-type keywords,
+    /// followed by exactly one type keyword or identifier, followed by zero or
+    /// more `*`/`&`, followed by `)`.  Also accepts user-defined type names
+    /// (bare `Ident`), not just built-in keywords.
     fn next_is_type_kw(&self) -> bool {
         let mut i = self.pos;
-        while i < self.tokens.len()
-            && matches!(
-                self.tokens[i].kind,
-                TokenKind::Whitespace | TokenKind::Newline
-            )
-        {
-            i += 1;
-        }
-        matches!(
-            self.tokens.get(i).map(|t| t.kind),
-            Some(
+        let skip_ws = |mut j: usize| -> usize {
+            while j < self.tokens.len()
+                && matches!(
+                    self.tokens[j].kind,
+                    TokenKind::Whitespace | TokenKind::Newline
+                )
+            {
+                j += 1;
+            }
+            j
+        };
+        i = skip_ws(i);
+
+        // Optional leading qualifiers / elaborated-type keywords (may repeat)
+        let is_type_lead = |k: TokenKind| {
+            matches!(
+                k,
                 TokenKind::Keyword
                     | TokenKind::KwStruct
                     | TokenKind::KwClass
@@ -258,7 +267,42 @@ impl<'src> Fmt<'src> {
                     | TokenKind::KwEnum
                     | TokenKind::KwTypename
             )
-        )
+        };
+
+        // Accept any number of qualifier/struct/class/… keywords before the
+        // core type name — but we need at least one type-like token overall.
+        let mut saw_type = false;
+        while i < self.tokens.len() {
+            let k = self.tokens[i].kind;
+            if is_type_lead(k) {
+                saw_type = true;
+                i += 1;
+                i = skip_ws(i);
+            } else if k == TokenKind::Ident {
+                // User-defined type name (e.g. MyStruct, size_t, uint32_t).
+                saw_type = true;
+                i += 1;
+                i = skip_ws(i);
+                break; // only one ident in a cast type
+            } else {
+                break;
+            }
+        }
+
+        if !saw_type {
+            return false;
+        }
+
+        // Optional pointer / reference decorators
+        while i < self.tokens.len()
+            && matches!(self.tokens[i].kind, TokenKind::Star | TokenKind::Amp)
+        {
+            i += 1;
+            i = skip_ws(i);
+        }
+
+        // Must end with `)`
+        matches!(self.tokens.get(i).map(|t| t.kind), Some(TokenKind::RParen))
     }
 
     // ── Inline-comment detection ──────────────────────────────────────────────
@@ -1727,6 +1771,28 @@ mod tests {
         assert!(
             out.contains("(double)(int)x"),
             "double cast should have no space between: {out}"
+        );
+    }
+
+    #[test]
+    fn cast_user_defined_type_no_space() {
+        // (MyType) val — user-defined type cast must honor space_after_cast=false.
+        let src = "void f() { MyType x = (MyType) val; }\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("(MyType)val"),
+            "user-defined type cast should have no space: {out}"
+        );
+    }
+
+    #[test]
+    fn cast_user_defined_pointer_no_space() {
+        // (MyType *) val — pointer cast with user-defined type.
+        let src = "void f() { MyType *x = (MyType *) val; }\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("(MyType*)val") || out.contains("(MyType *)val"),
+            "user-defined pointer cast should have no space after ')': {out}"
         );
     }
 

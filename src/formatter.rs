@@ -78,6 +78,20 @@ struct Fmt<'src> {
     /// Stack parallel to paren_depth: the column to align continuation lines
     /// to (i.e. the column right after the `(` was written).
     paren_col_stack: Vec<usize>,
+
+    // ── blank_line_after_var_decl_block state ─────────────────────────────────
+    /// True while we are in the leading declaration run of a function body.
+    in_var_decl_block: bool,
+    /// True after a `;` at function scope; cleared when the next statement's
+    /// first token is processed.
+    at_func_stmt_start: bool,
+    /// True once we have seen at least one declaration in the current function's
+    /// leading block (prevents a spurious blank when the function opens with
+    /// statements rather than declarations).
+    saw_func_decl: bool,
+    /// Set when the declaration run ends; causes flush_blank_lines to inject a
+    /// blank line before the first non-declaration statement.
+    force_blank_after_decls: bool,
 }
 
 impl<'src> Fmt<'src> {
@@ -109,6 +123,10 @@ impl<'src> Fmt<'src> {
             last_was_cast_close: false,
             current_col: 0,
             paren_col_stack: Vec::new(),
+            in_var_decl_block: false,
+            at_func_stmt_start: false,
+            saw_func_decl: false,
+            force_blank_after_decls: false,
         }
     }
 
@@ -216,6 +234,12 @@ impl<'src> Fmt<'src> {
 
     /// Emit pending blank lines, capped to `max_blank_lines`.
     fn flush_blank_lines(&mut self) {
+        if self.force_blank_after_decls {
+            self.force_blank_after_decls = false;
+            if self.blank_lines == 0 {
+                self.blank_lines = 1;
+            }
+        }
         let max = self.config.newlines.max_blank_lines as u32;
         if max > 0 {
             let emit = self.blank_lines.min(max);
@@ -224,6 +248,41 @@ impl<'src> Fmt<'src> {
             }
         }
         self.blank_lines = 0;
+    }
+
+    /// True for token kinds that can open a variable/type declaration at
+    /// function scope. Used by blank_line_after_var_decl_block.
+    fn is_decl_start(kind: TokenKind) -> bool {
+        matches!(
+            kind,
+            TokenKind::Keyword
+                | TokenKind::KwStruct
+                | TokenKind::KwClass
+                | TokenKind::KwUnion
+                | TokenKind::KwEnum
+                | TokenKind::KwTypename
+                | TokenKind::KwTypedef
+        )
+    }
+
+    /// Called once per token, before the token is written, to advance the
+    /// blank_line_after_var_decl_block state machine.
+    fn check_var_decl_transition(&mut self, kind: TokenKind) {
+        if !self.config.newlines.blank_line_after_var_decl_block {
+            return;
+        }
+        if !self.at_func_stmt_start || !self.in_var_decl_block {
+            return;
+        }
+        self.at_func_stmt_start = false;
+        if Self::is_decl_start(kind) {
+            self.saw_func_decl = true;
+        } else {
+            self.in_var_decl_block = false;
+            if self.saw_func_decl {
+                self.force_blank_after_decls = true;
+            }
+        }
     }
 
     /// Ensure we're at the start of a fresh line (emit newline + indent if not).
@@ -807,6 +866,8 @@ impl<'src> Fmt<'src> {
                 Some(t) => t.clone(),
             };
 
+            self.check_var_decl_transition(tok.kind);
+
             match tok.kind {
                 TokenKind::Eof => {
                     if self.config.newlines.final_newline && !self.at_line_start {
@@ -999,6 +1060,13 @@ impl<'src> Fmt<'src> {
                     if ctx == BraceCtx::Type {
                         self.class_depth += 1;
                     }
+                    if ctx == BraceCtx::Function
+                        && self.config.newlines.blank_line_after_var_decl_block
+                    {
+                        self.in_var_decl_block = true;
+                        self.at_func_stmt_start = true;
+                        self.saw_func_decl = false;
+                    }
                     self.pending_switch = false;
                     self.pending_type = false;
                     self.pending_extern_c = false;
@@ -1030,6 +1098,11 @@ impl<'src> Fmt<'src> {
                     }
                     if ctx == BraceCtx::Type {
                         self.class_depth = self.class_depth.saturating_sub(1);
+                    }
+                    if ctx == BraceCtx::Function {
+                        self.in_var_decl_block = false;
+                        self.at_func_stmt_start = false;
+                        self.force_blank_after_decls = false;
                     }
 
                     // Semicolon required after type definitions and namespace
@@ -1105,6 +1178,13 @@ impl<'src> Fmt<'src> {
                         } else {
                             self.nl();
                             self.skip_next_newline = true;
+                        }
+                        // Signal that the next token starts a new statement so the
+                        // var-decl-block state machine can evaluate it.
+                        if self.in_var_decl_block
+                            && self.brace_stack.last() == Some(&BraceCtx::Function)
+                        {
+                            self.at_func_stmt_start = true;
                         }
                     }
                     self.set_prev(TokenKind::Semi);
@@ -1827,6 +1907,52 @@ mod tests {
         let src = "auto v=std::vector<int>();";
         let out = fmt(src);
         assert!(out.contains("vector<int>()"), "got:\n{out}");
+    }
+
+    fn fmt_with_var_decl_blank(src: &str) -> String {
+        let mut config = Config::default();
+        config.newlines.blank_line_after_var_decl_block = true;
+        fmt_with(src, &config)
+    }
+
+    #[test]
+    fn var_decl_block_blank_line_inserted() {
+        let src = "void f() {\n    int x = 1;\n    int y = 2;\n    foo(x);\n}\n";
+        let out = fmt_with_var_decl_blank(src);
+        let lines: Vec<&str> = out.lines().collect();
+        // Find the blank line between `int y = 2;` and `foo(x);`
+        let decl_line = lines.iter().position(|l| l.contains("int y")).unwrap();
+        assert_eq!(
+            lines[decl_line + 1],
+            "",
+            "expected blank line after last decl:\n{out}"
+        );
+        assert!(
+            lines[decl_line + 2].contains("foo"),
+            "foo not after blank:\n{out}"
+        );
+    }
+
+    #[test]
+    fn var_decl_block_no_blank_when_no_decls() {
+        // Function with no leading declarations: no blank line added.
+        let src = "void g() {\n    foo();\n    bar();\n}\n";
+        let out = fmt_with_var_decl_blank(src);
+        assert!(
+            !out.contains("\n\n    bar"),
+            "should not add blank between two statements: {out}"
+        );
+    }
+
+    #[test]
+    fn var_decl_block_off_by_default() {
+        // Feature is off by default — no blank line inserted.
+        let src = "void f() {\n    int x = 1;\n    foo(x);\n}\n";
+        let out = fmt(src); // default config, feature disabled
+        assert!(
+            !out.contains("1;\n\n"),
+            "blank line must not appear when feature is off: {out}"
+        );
     }
 
     #[test]

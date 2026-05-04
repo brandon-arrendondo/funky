@@ -177,6 +177,10 @@ pub struct NewlineConfig {
     pub style: NewlineStyle,
     pub max_blank_lines: u8,
     pub final_newline: bool,
+    /// Insert a blank line between the leading variable-declaration block and
+    /// the first statement in a function body (analogous to uncrustify's
+    /// `nl_func_var_def_blk`).
+    pub blank_line_after_var_decl_block: bool,
 }
 
 impl Default for NewlineConfig {
@@ -185,6 +189,7 @@ impl Default for NewlineConfig {
             style: NewlineStyle::Lf,
             max_blank_lines: 2,
             final_newline: true,
+            blank_line_after_var_decl_block: false,
         }
     }
 }
@@ -231,6 +236,7 @@ space_inside_angle_brackets = false
 style           = "lf"
 max_blank_lines = 2
 final_newline   = true
+blank_line_after_var_decl_block = false
 "#;
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.indent.width, 4);

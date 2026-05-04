@@ -1362,6 +1362,11 @@ impl<'src> Fmt<'src> {
                     }
                     self.nl();
                     self.skip_next_newline = true;
+                    if self.config.newlines.blank_line_after_open_brace
+                        && matches!(ctx, BraceCtx::Function | BraceCtx::Block)
+                    {
+                        self.blank_lines = self.blank_lines.max(1);
+                    }
                     self.set_prev(TokenKind::LBrace);
                 }
 
@@ -3133,6 +3138,74 @@ mod tests {
         assert_eq!(
             inline_positions[0], inline_positions[1],
             "two inline /**< comments must be aligned:\n{out}"
+        );
+    }
+
+    fn fmt_with_open_brace_blank(src: &str) -> String {
+        let mut config = Config::default();
+        config.newlines.blank_line_after_open_brace = true;
+        fmt_with(src, &config)
+    }
+
+    #[test]
+    fn blank_line_after_open_brace_function() {
+        let src = "void f() {\n    return;\n}\n";
+        let out = fmt_with_open_brace_blank(src);
+        let lines: Vec<&str> = out.lines().collect();
+        // Line after `{` must be blank, then `return`
+        let brace_line = lines.iter().position(|l| l.ends_with('{')).unwrap();
+        assert_eq!(
+            lines[brace_line + 1],
+            "",
+            "expected blank line after open brace:\n{out}"
+        );
+        assert!(
+            lines[brace_line + 2].contains("return"),
+            "return not after blank:\n{out}"
+        );
+    }
+
+    #[test]
+    fn blank_line_after_open_brace_block() {
+        let src = "void f() {\n    if (x) {\n        foo();\n    }\n}\n";
+        let out = fmt_with_open_brace_blank(src);
+        // Both the function `{` and the if-block `{` get a blank line after them.
+        let brace_lines: Vec<usize> = out
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| l.ends_with('{'))
+            .map(|(i, _)| i)
+            .collect();
+        for idx in &brace_lines {
+            let next = out.lines().nth(idx + 1).unwrap_or("");
+            assert_eq!(next, "", "expected blank after {{ at line {idx}:\n{out}");
+        }
+    }
+
+    #[test]
+    fn blank_line_after_open_brace_not_struct() {
+        // Struct bodies must NOT get a blank line after `{`.
+        let src = "struct S {\n    int x;\n};\n";
+        let out = fmt_with_open_brace_blank(src);
+        let lines: Vec<&str> = out.lines().collect();
+        let brace_line = lines.iter().position(|l| l.ends_with('{')).unwrap();
+        assert_ne!(
+            lines[brace_line + 1],
+            "",
+            "struct body must not get blank after open brace:\n{out}"
+        );
+    }
+
+    #[test]
+    fn blank_line_after_open_brace_disabled_by_default() {
+        let src = "void f() {\n    return;\n}\n";
+        let out = fmt(src);
+        let lines: Vec<&str> = out.lines().collect();
+        let brace_line = lines.iter().position(|l| l.ends_with('{')).unwrap();
+        assert_ne!(
+            lines[brace_line + 1],
+            "",
+            "blank after open brace must be off by default:\n{out}"
         );
     }
 }

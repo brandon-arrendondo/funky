@@ -204,6 +204,10 @@ pub struct NewlineConfig {
     /// the first statement in a function body (analogous to uncrustify's
     /// `nl_func_var_def_blk`).
     pub blank_line_after_var_decl_block: bool,
+    /// Insert a blank line immediately after the opening `{` of function
+    /// bodies and control-flow blocks (analogous to uncrustify's
+    /// `nl_after_brace_open`).
+    pub blank_line_after_open_brace: bool,
 }
 
 impl Default for NewlineConfig {
@@ -213,6 +217,7 @@ impl Default for NewlineConfig {
             max_blank_lines: 2,
             final_newline: true,
             blank_line_after_var_decl_block: true,
+            blank_line_after_open_brace: false,
         }
     }
 }
@@ -265,6 +270,7 @@ style           = "lf"
 max_blank_lines = 2
 final_newline   = true
 blank_line_after_var_decl_block = false
+blank_line_after_open_brace     = false
 "#;
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.indent.width, 4);

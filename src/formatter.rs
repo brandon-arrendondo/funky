@@ -48,6 +48,8 @@ struct Fmt<'src> {
     case_body_stack: Vec<bool>,
     /// Current preprocessor #if nesting depth (used for pp_indent).
     pp_depth: u32,
+    /// Number of open ternary `?` operators; used to detect ternary `:`.
+    ternary_depth: u32,
     /// Set when `operator` keyword is emitted; cleared on the next non-ws token
     /// so that the overloaded operator symbol gets no surrounding space.
     after_operator_kw: bool,
@@ -137,6 +139,7 @@ impl<'src> Fmt<'src> {
             switch_depth: 0,
             case_body_stack: Vec::new(),
             pp_depth: 0,
+            ternary_depth: 0,
             after_operator_kw: false,
             last_was_operator_overload: false,
             class_depth: 0,
@@ -1359,10 +1362,9 @@ impl<'src> Fmt<'src> {
             return self.config.spacing.space_around_binary_ops;
         }
 
-        // Colon: ternary, labels, case, member init — space on both sides by default
+        // Colon: ternary gets space on both sides; case/label/base-class does not.
         if next == TokenKind::Colon {
-            // case X: or label: — no trailing space before ':'
-            return false;
+            return self.ternary_depth > 0;
         }
         if prev == TokenKind::Colon {
             return true;
@@ -1850,9 +1852,16 @@ impl<'src> Fmt<'src> {
                     self.set_prev(TokenKind::RBracket);
                 }
 
-                // ── Colon after case / default / access specifier ─────────────
+                // ── Colon after case / default / access specifier / ternary ──
                 TokenKind::Colon => {
                     self.flush_blank_lines();
+                    // Ternary `:` gets a space before it; case/label/access do not.
+                    if self.ternary_depth > 0 && !self.in_case_label && !self.in_access_label {
+                        self.ternary_depth = self.ternary_depth.saturating_sub(1);
+                        if !self.at_line_start {
+                            self.space();
+                        }
+                    }
                     self.write(":");
                     if self.in_case_label {
                         self.in_case_label = false;
@@ -2133,6 +2142,10 @@ impl<'src> Fmt<'src> {
                     // `operator` keyword — suppress spacing before the overloaded symbol.
                     if tok.kind == TokenKind::Keyword && tok.lexeme == "operator" {
                         self.after_operator_kw = true;
+                    }
+                    // Ternary `?` — track depth so the matching `:` gets spaces.
+                    if tok.kind == TokenKind::Question {
+                        self.ternary_depth += 1;
                     }
                 }
             }
@@ -4343,6 +4356,40 @@ mod tests {
         assert!(
             out.lines().any(|l| l.contains("operator()(int")),
             "operator() must not have space before (:\n{out}"
+        );
+    }
+
+    #[test]
+    fn ternary_colon_has_space() {
+        let src = "int f(int x) { return x == 0 ? 0 : 1; }\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("? 0 : 1"),
+            "ternary : must have space before and after:\n{out}"
+        );
+    }
+
+    #[test]
+    fn nested_ternary_colon_has_space() {
+        let src = "int f(int a, int b, int c) { return a ? b ? c : 0 : 1; }\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("? c : 0 : 1"),
+            "nested ternary : must have spaces:\n{out}"
+        );
+    }
+
+    #[test]
+    fn case_label_no_space_before_colon() {
+        let src = "void f(int x) { switch (x) { case 1: break; default: break; } }\n";
+        let out = fmt(src);
+        assert!(
+            out.lines().any(|l| l.trim() == "case 1:"),
+            "case label must not have space before colon:\n{out}"
+        );
+        assert!(
+            out.lines().any(|l| l.trim() == "default:"),
+            "default label must not have space before colon:\n{out}"
         );
     }
 }

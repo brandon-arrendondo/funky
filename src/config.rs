@@ -12,7 +12,24 @@ pub struct Config {
     pub braces: BraceConfig,
     pub spacing: SpacingConfig,
     pub newlines: NewlineConfig,
+    pub preprocessor: PreprocConfig,
     pub ignore: IgnoreConfig,
+}
+
+// ── Preprocessor ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PreprocConfig {
+    /// Indent preprocessor directives relative to their `#if`/`#ifdef`/`#ifndef`
+    /// nesting depth (analogous to uncrustify's `pp_indent = add`). Default false.
+    pub pp_indent: bool,
+}
+
+impl Default for PreprocConfig {
+    fn default() -> Self {
+        Self { pp_indent: false }
+    }
 }
 
 // ── Ignore ───────────────────────────────────────────────────────────────────

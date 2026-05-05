@@ -24,7 +24,7 @@ todo-sqlite-cli done <id>   # after committing
 | File | Purpose |
 |------|---------|
 | `src/main.rs` | CLI entry point (clap 4). `--in-place`, `--check`, `--config`, `--dump-tokens`. |
-| `src/config.rs` | `Config` struct deserialized from `funky.toml` via serde. `BraceStyle`, `IndentStyle`, `SpacingConfig`, `NewlineConfig`. All keys optional with defaults. |
+| `src/config.rs` | `Config` struct deserialized from `funky.toml` via serde. `BraceStyle`, `IndentStyle`, `SpacingConfig`, `NewlineConfig`, `PreprocConfig`. All keys optional with defaults. |
 | `src/token.rs` | `TokenKind` enum — **no payload**, text lives in `Token.lexeme`. `Token<'src>` borrows the source string. Helper methods: `is_control_kw`, `is_any_kw`, `ends_expr`, `is_binary_op`. |
 | `src/lexer.rs` | `Cursor` (char iterator + byte position), `Lexer`, `tokenize()`. Handles all C/C++ token types including Unicode identifiers/comments, string prefixes (`L""` `u""` `u8""` `R"()"`), hex/binary/octal/float literals, multi-line `#define`. |
 | `src/formatter.rs` | `Fmt` struct walks the token stream and rebuilds the source with correct whitespace. `format()` is the public entry point. |
@@ -36,7 +36,7 @@ todo-sqlite-cli done <id>   # after committing
 
 **`BraceCtx` stack** — tracks what opened each `{`: `Block`, `Type`, `Namespace`, `Function`, `Other`. Used to decide brace placement, whether a `;` follows `}`, and `typedef struct { } Name` (name stays on same line as `}`).
 
-**Preprocessor is opaque** — `PreprocLine` tokens are passed through verbatim (only newline style is normalized). Do not apply spacing rules inside them. Funky does **not** implement `pp_indent`-style indentation (indenting `#include`/`#define`/nested `#if` relative to `#if` nesting depth, as uncrustify's `pp_indent = add` does). This is a known gap; implementing it would require tracking `#if`/`#elif`/`#else`/`#endif` depth inside the formatter and adding a config option.
+**Preprocessor is opaque** — `PreprocLine` tokens are passed through verbatim (only newline style is normalized). Do not apply spacing rules inside them. When `preprocessor.pp_indent = true`, the formatter tracks `#if`/`#elif`/`#else`/`#endif` depth via `pp_depth: u32` and prefixes each directive with `(depth * indent_width)` spaces. Default is `false` (no indentation), matching uncrustify defaults.
 
 **Whitespace/Newline tokens are preserved** — the lexer keeps them so `skip_ws()` can count blank lines. The formatter discards them and manages all whitespace itself.
 

@@ -34,3 +34,6 @@ final_newline   = true
 blank_line_after_var_decl_block = true   # insert blank line after leading var decls in a function
 blank_line_after_open_brace     = false  # insert blank line after { in function/block bodies
 merge_line_comment              = false  # hoist standalone // comment onto preceding {/}/; line
+
+[preprocessor]
+pp_indent = false  # indent #include/#define/nested #if relative to #if nesting depth (uncrustify pp_indent = add)

@@ -46,6 +46,8 @@ struct Fmt<'src> {
     /// Per-switch stack tracking whether the current case body has added an
     /// extra indent level (only used when config.indent.indent_switch_case).
     case_body_stack: Vec<bool>,
+    /// Current preprocessor #if nesting depth (used for pp_indent).
+    pp_depth: u32,
     /// Number of class/struct/union bodies we are currently inside — used to dedent access specifiers.
     class_depth: u32,
     /// Set when `switch` keyword is emitted; cleared once its `{` is consumed.
@@ -128,6 +130,7 @@ impl<'src> Fmt<'src> {
             prev: None,
             switch_depth: 0,
             case_body_stack: Vec::new(),
+            pp_depth: 0,
             class_depth: 0,
             pending_switch: false,
             pending_type: false,
@@ -1348,7 +1351,35 @@ impl<'src> Fmt<'src> {
                     let normalized = tok.lexeme.replace("\r\n", "\n").replace('\r', "\n");
                     let nl = self.config.newline_str();
                     let normalized = normalized.replace('\n', nl);
-                    self.write(&normalized);
+
+                    if self.config.preprocessor.pp_indent {
+                        // Classify directive to decide depth adjustment.
+                        let trimmed = normalized.trim_start();
+                        let directive = trimmed
+                            .strip_prefix('#')
+                            .map(|s| s.trim_start().split_whitespace().next().unwrap_or(""))
+                            .unwrap_or("");
+                        let is_open = matches!(directive, "if" | "ifdef" | "ifndef");
+                        let is_close = directive == "endif";
+                        let is_reopen = matches!(directive, "elif" | "else");
+
+                        // #endif and #elif/#else dedent before emit.
+                        if is_close || is_reopen {
+                            self.pp_depth = self.pp_depth.saturating_sub(1);
+                        }
+                        let indent_str =
+                            self.config.indent_str().repeat(self.pp_depth as usize);
+                        // Write depth-prefix before the `#`.
+                        self.write(&indent_str);
+                        self.write(trimmed);
+                        // #if and #elif/#else increase depth after emit.
+                        if is_open || is_reopen {
+                            self.pp_depth += 1;
+                        }
+                    } else {
+                        self.write(&normalized);
+                    }
+
                     if !self.at_line_start {
                         self.nl();
                     }
@@ -4116,6 +4147,70 @@ mod tests {
         assert!(
             out.lines().any(|l| l.trim() == "// comment"),
             "standalone comment must remain on its own line:\n{out}"
+        );
+    }
+
+    #[test]
+    fn pp_indent_disabled_by_default() {
+        let src = "#if defined(FOO)\n#include <foo.h>\n#endif\n";
+        let out = fmt(src);
+        // Default: no indentation of preprocessor directives.
+        assert!(
+            out.lines().any(|l| l == "#include <foo.h>"),
+            "pp_indent must be off by default:\n{out}"
+        );
+    }
+
+    #[test]
+    fn pp_indent_enabled() {
+        use crate::config::PreprocConfig;
+        let cfg = Config {
+            preprocessor: PreprocConfig { pp_indent: true },
+            ..Config::default()
+        };
+        let src =
+            "#if defined(FOO)\n#include <foo.h>\n#if defined(BAZ)\n#define QUX 2\n#endif\n#endif\n";
+        let out = fmt_with(src, &cfg);
+        assert!(
+            out.lines().any(|l| l == "    #include <foo.h>"),
+            "depth-1 directive must be indented 4 spaces:\n{out}"
+        );
+        assert!(
+            out.lines().any(|l| l == "    #if defined(BAZ)"),
+            "depth-1 #if must be indented 4 spaces:\n{out}"
+        );
+        assert!(
+            out.lines().any(|l| l == "        #define QUX 2"),
+            "depth-2 directive must be indented 8 spaces:\n{out}"
+        );
+        assert!(
+            out.lines().any(|l| l == "    #endif"),
+            "depth-1 #endif must be indented 4 spaces:\n{out}"
+        );
+    }
+
+    #[test]
+    fn pp_indent_elif_else_at_outer_level() {
+        use crate::config::PreprocConfig;
+        let cfg = Config {
+            preprocessor: PreprocConfig { pp_indent: true },
+            ..Config::default()
+        };
+        let src = "#ifdef WIN32\n#define PLATFORM \"windows\"\n#elif defined(LINUX)\n#define PLATFORM \"linux\"\n#else\n#define PLATFORM \"unknown\"\n#endif\n";
+        let out = fmt_with(src, &cfg);
+        // #elif and #else must be at the #if level (depth 0).
+        assert!(
+            out.lines().any(|l| l == "#elif defined(LINUX)"),
+            "#elif must be at depth 0:\n{out}"
+        );
+        assert!(
+            out.lines().any(|l| l == "#else"),
+            "#else must be at depth 0:\n{out}"
+        );
+        // Content between #elif and #else at depth 1.
+        assert!(
+            out.lines().any(|l| l == "    #define PLATFORM \"linux\""),
+            "#define after #elif must be at depth 1:\n{out}"
         );
     }
 }

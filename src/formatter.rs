@@ -1597,13 +1597,11 @@ impl<'src> Fmt<'src> {
 
                 // ── Closing brace ─────────────────────────────────────────────
                 TokenKind::RBrace => {
-                    // Discard blank lines right before `}` — trailing blank lines
-                    // inside a block are rarely intentional and look odd.
-                    self.blank_lines = 0;
                     let closing_ctx = self.brace_stack.last().copied().unwrap_or(BraceCtx::Other);
                     if closing_ctx != BraceCtx::ExternC && self.indent_level > 0 {
                         self.indent_level -= 1;
                     }
+                    self.flush_blank_lines();
                     self.ensure_own_line();
                     self.write("}");
 
@@ -4023,6 +4021,19 @@ mod tests {
         assert!(
             out.lines().any(|l| l.trim() == "// not merged"),
             "standalone comment missing:\n{out}"
+        );
+    }
+
+    #[test]
+    fn blank_line_before_close_brace_preserved() {
+        let src = "void foo(void) {\n    int x = 1;\n\n    x++;\n\n}\n";
+        let out = fmt(src);
+        let lines: Vec<&str> = out.lines().collect();
+        let rbrace_idx = lines.iter().rposition(|l| l.trim() == "}").unwrap();
+        assert_eq!(
+            lines[rbrace_idx - 1],
+            "",
+            "blank line before closing brace must be preserved:\n{out}"
         );
     }
 

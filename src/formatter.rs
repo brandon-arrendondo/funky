@@ -2135,10 +2135,20 @@ fn align_enum_equals(output: &str, nl: &str) -> String {
     let mut i = 0;
     while i < n {
         if cols[i].is_some() {
-            // Extend the group through bare members as well as `=` members.
+            // Extend the group through bare members and blank lines as well as `=` members.
+            // Blank lines are transparent so that enum values separated by blank lines
+            // are still aligned together (like uncrustify's pp_indent behaviour for enums).
             let mut j = i + 1;
-            while j < n && (cols[j].is_some() || is_bare_enum_member(lines[j])) {
+            while j < n
+                && (cols[j].is_some()
+                    || is_bare_enum_member(lines[j])
+                    || lines[j].trim().is_empty())
+            {
                 j += 1;
+            }
+            // Trim trailing blank/bare lines so they don't become orphaned group members.
+            while j > i + 1 && cols[j - 1].is_none() {
+                j -= 1;
             }
             // Collect indices of only the `=`-bearing lines in this group.
             let eq_indices: Vec<usize> = (i..j).filter(|&k| cols[k].is_some()).collect();
@@ -3556,7 +3566,9 @@ mod tests {
     }
 
     #[test]
-    fn align_enum_equals_blank_line_breaks_group() {
+    fn align_enum_equals_blank_line_transparent() {
+        // Blank lines inside an enum are transparent: all four values should align
+        // together even though they are separated by a blank line.
         let src = "enum E { A = 1,\nLONG_NAME = 2,\n\nC = 10,\nD = 11,\n};\n";
         let out = fmt_with(src, &cfg_enum_align(1));
         let positions: Vec<usize> = out.lines().filter_map(enum_eq_col).collect();
@@ -3565,10 +3577,24 @@ mod tests {
             4,
             "expected 4 enum value lines, got:\n{out}"
         );
-        // First two are in group-1 and must be aligned.
-        assert_eq!(positions[0], positions[1], "group-1 = not aligned:\n{out}");
-        // Last two are in group-2 (both 1-char names, already equal).
-        assert_eq!(positions[2], positions[3], "group-2 = not aligned:\n{out}");
+        // All four are in one group (blank line is transparent) and must be aligned.
+        assert!(
+            positions.windows(2).all(|w| w[0] == w[1]),
+            "= signs not all aligned across blank line: {positions:?}\n{out}"
+        );
+    }
+
+    #[test]
+    fn align_enum_equals_isolated_values_aligned() {
+        // Each value on its own paragraph (blank line between every pair) — all should align.
+        let src = "typedef enum {\nSUCCESS = 0,\n\nVERY_LONG_FAILURE_CODE = 1,\n\nTIMEOUT = 2,\n} R;\n";
+        let out = fmt_with(src, &cfg_enum_align(1));
+        let positions: Vec<usize> = out.lines().filter_map(enum_eq_col).collect();
+        assert_eq!(positions.len(), 3, "expected 3 value lines:\n{out}");
+        assert!(
+            positions.windows(2).all(|w| w[0] == w[1]),
+            "= signs not aligned: {positions:?}\n{out}"
+        );
     }
 
     #[test]

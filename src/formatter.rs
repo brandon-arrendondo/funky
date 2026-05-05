@@ -85,6 +85,12 @@ struct Fmt<'src> {
     /// non-whitespace on its line, meaning continuations use a regular indent
     /// instead of column alignment.
     paren_eol_stack: Vec<bool>,
+    /// Column to align continuation lines to after an `=` assignment operator.
+    /// None when not inside an assignment RHS at statement level.
+    assign_col: Option<usize>,
+    /// True when the `=` that opened `assign_col` was the last non-whitespace
+    /// on its line, meaning continuations use a regular indent.
+    assign_eol: bool,
 
     // ── blank_line_after_var_decl_block state ─────────────────────────────────
     /// True while we are in the leading declaration run of a function body.
@@ -132,6 +138,8 @@ impl<'src> Fmt<'src> {
             current_col: 0,
             paren_col_stack: Vec::new(),
             paren_eol_stack: Vec::new(),
+            assign_col: None,
+            assign_eol: false,
             in_var_decl_block: false,
             at_func_stmt_start: false,
             saw_func_decl: false,
@@ -200,6 +208,10 @@ impl<'src> Fmt<'src> {
             self.align_to_paren();
             return;
         }
+        if self.assign_col.is_some() {
+            self.align_to_assign();
+            return;
+        }
         let unit = self.config.indent_str();
         for _ in 0..self.indent_level {
             self.output.push_str(&unit);
@@ -231,6 +243,32 @@ impl<'src> Fmt<'src> {
             }
         }
         if let Some(&col) = self.paren_col_stack.last() {
+            for _ in 0..col {
+                self.output.push(' ');
+            }
+            self.current_col = col;
+            if col > 0 {
+                self.at_line_start = false;
+            }
+        }
+    }
+
+    fn align_to_assign(&mut self) {
+        // When `=` was the last non-whitespace before the newline, aligning to
+        // its column would leave no room for content. Use a regular indent instead.
+        if !self.assign_eol && self.output.trim_end().ends_with('=') {
+            self.assign_eol = true;
+        }
+        if self.assign_eol {
+            let unit = self.config.indent_str();
+            for _ in 0..=self.indent_level {
+                self.output.push_str(&unit);
+                self.current_col += unit.len();
+            }
+            self.at_line_start = false;
+            return;
+        }
+        if let Some(col) = self.assign_col {
             for _ in 0..col {
                 self.output.push(' ');
             }
@@ -1409,6 +1447,8 @@ impl<'src> Fmt<'src> {
                     self.pending_switch = false;
                     self.pending_type = false;
                     self.pending_extern_c = false;
+                    // `{` takes over indentation; = alignment no longer applies.
+                    self.assign_col = None;
                     let is_large_init = ctx == BraceCtx::Other
                         && self.config.braces.expand_large_initializers
                         && self.large_flat_initializer_end().is_some();
@@ -1488,6 +1528,7 @@ impl<'src> Fmt<'src> {
                     self.write(";");
                     // Don't emit newline if we're inside parens (for-loop header).
                     if self.paren_depth == 0 {
+                        self.assign_col = None;
                         // If a trailing inline comment follows on the same source
                         // line, let the CommentLine handler close the line instead.
                         if self.peek_inline_comment(tok.span.line) {
@@ -1769,6 +1810,33 @@ impl<'src> Fmt<'src> {
                         }
                     }
                     self.set_prev(TokenKind::Comma);
+                }
+
+                // ── Assignment operators — track RHS column for continuation ──
+                TokenKind::Eq
+                | TokenKind::PlusEq
+                | TokenKind::MinusEq
+                | TokenKind::StarEq
+                | TokenKind::SlashEq
+                | TokenKind::PercentEq
+                | TokenKind::AmpEq
+                | TokenKind::PipeEq
+                | TokenKind::CaretEq
+                | TokenKind::LtLtEq
+                | TokenKind::GtGtEq => {
+                    self.flush_blank_lines();
+                    if self.at_line_start {
+                        self.indent();
+                    } else if self.needs_space(tok.kind) {
+                        self.space();
+                    }
+                    self.write(tok.lexeme);
+                    if self.paren_depth == 0 && self.bracket_depth == 0 && self.assign_col.is_none() {
+                        let space = usize::from(self.config.spacing.space_around_binary_ops);
+                        self.assign_col = Some(self.current_col + space);
+                        self.assign_eol = false;
+                    }
+                    self.set_prev(tok.kind);
                 }
 
                 // ── Everything else ───────────────────────────────────────────
@@ -3079,6 +3147,39 @@ mod tests {
         assert!(
             indents.iter().all(|&i| i == indents[0]),
             "all continuation lines must have same indent, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn assign_continuation_aligns_to_rhs_column() {
+        // `    int result = ` = 16 chars, so continuation aligns at col 16
+        let src = "void f() { int result = value1 +\nvalue2 +\nvalue3; }\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("= value1 +\n                 value2 +\n                 value3"),
+            "continuation after = should align to RHS column, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn assign_eol_continuation_uses_deeper_indent() {
+        // When `=` is the last token on its line, continuation uses indent+1.
+        let src = "void f() { int x =\nvalue; }\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("int x =\n        value"),
+            "= at EOL continuation should use indent+1, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn assign_continuation_cleared_by_brace() {
+        // Initializer brace `{` should not be aligned to the = column.
+        let src = "int a[3] = {\n1,\n2,\n3\n};\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("= {\n    1,\n    2,\n    3\n}"),
+            "initializer elements must use brace indent, not = column, got:\n{out}"
         );
     }
 

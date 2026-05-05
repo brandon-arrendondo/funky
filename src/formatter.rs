@@ -1568,7 +1568,11 @@ impl<'src> Fmt<'src> {
                     }
                     self.write("(");
                     self.paren_depth += 1;
-                    self.paren_col_stack.push(self.current_col);
+                    // When space_inside_parens is set, the first argument starts
+                    // one column later; include that offset so continuation lines
+                    // align with it rather than with the bare `(`.
+                    let extra = usize::from(self.config.spacing.space_inside_parens);
+                    self.paren_col_stack.push(self.current_col + extra);
                     self.paren_eol_stack.push(false);
                     self.set_prev(TokenKind::LParen);
                 }
@@ -3095,6 +3099,28 @@ mod tests {
         assert!(
             out.contains("void foo(int a,\n         int b,\n         int c)"),
             "continuation params should align to opening paren column, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn space_inside_parens_continuation_alignment() {
+        // When space_inside_parens is enabled the leading space shifts the first
+        // argument by one column; continuation lines must align with that shifted
+        // column so all arguments line up.
+        use crate::config::SpacingConfig;
+        let src = "void f() { foo(arg1,\narg2,\narg3); }\n";
+        let cfg = Config {
+            spacing: SpacingConfig {
+                space_inside_parens: true,
+                ..SpacingConfig::default()
+            },
+            ..Config::default()
+        };
+        let out = fmt_with(src, &cfg);
+        // `    foo( ` = 9 chars → arg2 aligns at col 9 (9 spaces)
+        assert!(
+            out.contains("foo( arg1,\n         arg2,\n         arg3 )"),
+            "with space_inside_parens, continuation must align to first-arg column, got:\n{out}"
         );
     }
 

@@ -399,10 +399,13 @@ impl<'src> Fmt<'src> {
         // Comments before the first declaration are transparent — a preamble
         // `/* ... */` does not end the declaration run before it has started.
         // Once we have seen at least one declaration (saw_func_decl = true),
-        // a standalone comment marks the end of the block so the blank line
-        // is placed before it (matching uncrustify).
-        if matches!(kind, TokenKind::CommentLine | TokenKind::CommentBlock) && !self.saw_func_decl {
-            return;
+        // a STANDALONE comment marks the end of the block. Trailing inline
+        // comments (`int x = 0; /* note */`) are not at line start and must
+        // not trigger the transition or force_blank_after_decls.
+        if matches!(kind, TokenKind::CommentLine | TokenKind::CommentBlock) {
+            if !self.saw_func_decl || !self.at_line_start {
+                return;
+            }
         }
         self.at_func_stmt_start = false;
         let is_decl =
@@ -2388,6 +2391,22 @@ mod tests {
         assert!(line.contains("// note"), "comment moved off line: {out}");
         // Subsequent statement must be on its own line.
         assert!(out.contains("\nint y"), "y not on new line: {out}");
+    }
+
+    #[test]
+    fn inline_block_comment_after_semi_stays_on_same_line() {
+        // `/* */` trailing comment must not be moved to a new line by
+        // the var-decl-block transition logic.
+        let src = "void f() {\n    result_e r = OK; /* default */\n    int x = 0;\n}\n";
+        let out = fmt(src);
+        let r_line = out
+            .lines()
+            .find(|l| l.contains("result_e"))
+            .expect("no r line");
+        assert!(
+            r_line.contains("/* default */"),
+            "block comment moved off declaration line:\n{out}"
+        );
     }
 
     #[test]

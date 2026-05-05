@@ -3251,6 +3251,34 @@ mod tests {
     }
 
     #[test]
+    fn indent_style_tabs() {
+        use crate::config::{IndentConfig, IndentStyle};
+        let cfg = Config {
+            indent: IndentConfig { style: IndentStyle::Tabs, width: 4 },
+            ..Config::default()
+        };
+        let src = "void f(int x) { if (x > 0) { foo(x); } }\n";
+        let out = fmt_with(src, &cfg);
+        // Each indent level must use a literal tab, not spaces.
+        assert!(out.contains("\tif (x > 0)"), "level-1 indent: {out}");
+        assert!(out.contains("\t\tfoo(x)"), "level-2 indent: {out}");
+        assert!(!out.contains("    "), "no 4-space runs: {out}");
+    }
+
+    #[test]
+    fn indent_style_tabs_idempotent() {
+        use crate::config::{IndentConfig, IndentStyle};
+        let cfg = Config {
+            indent: IndentConfig { style: IndentStyle::Tabs, width: 4 },
+            ..Config::default()
+        };
+        let src = "void f() {\n\tif (x) {\n\t\tfoo();\n\t}\n}\n";
+        let pass1 = fmt_with(src, &cfg);
+        let pass2 = fmt_with(&pass1, &cfg);
+        assert_eq!(pass1, pass2, "tab-indent formatting must be idempotent");
+    }
+
+    #[test]
     fn unary_after_assignment_space() {
         // = &ptr, = -1, = *ptr, = +val must preserve space after `=`.
         let src = "void f() { int a = &ptr; int b = -1; int c = *ptr; int d = +val; }\n";

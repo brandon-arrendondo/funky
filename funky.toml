@@ -4,6 +4,7 @@
 [indent]
 style = "spaces"   # "spaces" or "tabs"
 width = 4          # spaces per indent level (or tab display width)
+indent_switch_case = true  # indent case/default labels inside switch (matches uncrustify indent_switch_case)
 
 [braces]
 style = "kr"       # "kr" (same line), "allman" (own line), "stroustrup"

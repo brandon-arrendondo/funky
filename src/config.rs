@@ -68,6 +68,10 @@ impl Config {
 pub struct IndentConfig {
     pub style: IndentStyle,
     pub width: u8,
+    /// Indent `case`/`default` labels one level inside `switch {}`, and indent
+    /// the case body one further level (analogous to uncrustify's
+    /// `indent_switch_case = <indent_columns>`).
+    pub indent_switch_case: bool,
 }
 
 impl Default for IndentConfig {
@@ -75,6 +79,7 @@ impl Default for IndentConfig {
         Self {
             style: IndentStyle::Spaces,
             width: 4,
+            indent_switch_case: true,
         }
     }
 }
@@ -251,6 +256,7 @@ mod tests {
 [indent]
 style = "spaces"
 width = 4
+indent_switch_case = true
 
 [braces]
 style = "kr"

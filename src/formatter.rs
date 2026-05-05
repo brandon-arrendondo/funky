@@ -43,6 +43,9 @@ struct Fmt<'src> {
     prev: Option<TokenKind>,
     /// Number of switch bodies we are currently inside — used to dedent case/default.
     switch_depth: u32,
+    /// Per-switch stack tracking whether the current case body has added an
+    /// extra indent level (only used when config.indent.indent_switch_case).
+    case_body_stack: Vec<bool>,
     /// Number of class/struct/union bodies we are currently inside — used to dedent access specifiers.
     class_depth: u32,
     /// Set when `switch` keyword is emitted; cleared once its `{` is consumed.
@@ -124,6 +127,7 @@ impl<'src> Fmt<'src> {
             skip_next_newline: false,
             prev: None,
             switch_depth: 0,
+            case_body_stack: Vec::new(),
             class_depth: 0,
             pending_switch: false,
             pending_type: false,
@@ -1561,6 +1565,7 @@ impl<'src> Fmt<'src> {
 
                     if ctx == BraceCtx::Switch {
                         self.switch_depth += 1;
+                        self.case_body_stack.push(false);
                     }
                     if ctx == BraceCtx::Type {
                         self.class_depth += 1;
@@ -1598,6 +1603,16 @@ impl<'src> Fmt<'src> {
                 // ── Closing brace ─────────────────────────────────────────────
                 TokenKind::RBrace => {
                     let closing_ctx = self.brace_stack.last().copied().unwrap_or(BraceCtx::Other);
+                    // When indent_switch_case is on, an active case body adds an
+                    // extra indent level that must be unwound before the `}`.
+                    if closing_ctx == BraceCtx::Switch
+                        && self.config.indent.indent_switch_case
+                    {
+                        if let Some(true) = self.case_body_stack.last() {
+                            self.indent_level = self.indent_level.saturating_sub(1);
+                        }
+                        self.case_body_stack.pop();
+                    }
                     if closing_ctx != BraceCtx::ExternC && self.indent_level > 0 {
                         self.indent_level -= 1;
                     }
@@ -1744,6 +1759,12 @@ impl<'src> Fmt<'src> {
                         self.in_case_label = false;
                         self.nl();
                         self.skip_next_newline = true;
+                        if self.config.indent.indent_switch_case {
+                            self.indent_level += 1;
+                            if let Some(active) = self.case_body_stack.last_mut() {
+                                *active = true;
+                            }
+                        }
                     } else if self.in_access_label {
                         self.in_access_label = false;
                         self.nl();
@@ -1765,17 +1786,30 @@ impl<'src> Fmt<'src> {
                     self.set_prev(tok.kind);
                 }
 
-                // ── case / default labels — dedented to switch level ──────────
+                // ── case / default labels ─────────────────────────────────────
                 TokenKind::KwCase | TokenKind::KwDefault => {
                     self.flush_blank_lines();
                     if self.at_line_start {
-                        // Dedent one level relative to the switch body.
-                        let saved = self.indent_level;
-                        if self.switch_depth > 0 && self.indent_level > 0 {
-                            self.indent_level -= 1;
+                        if self.config.indent.indent_switch_case {
+                            // Undo any prior case-body extra indent, then print
+                            // at the switch-body level (no additional dedent).
+                            if let Some(active) = self.case_body_stack.last_mut() {
+                                if *active {
+                                    self.indent_level =
+                                        self.indent_level.saturating_sub(1);
+                                    *active = false;
+                                }
+                            }
+                            self.indent();
+                        } else {
+                            // Dedent one level relative to the switch body.
+                            let saved = self.indent_level;
+                            if self.switch_depth > 0 && self.indent_level > 0 {
+                                self.indent_level -= 1;
+                            }
+                            self.indent();
+                            self.indent_level = saved;
                         }
-                        self.indent();
-                        self.indent_level = saved;
                     } else if self.needs_space(tok.kind) {
                         self.space();
                     }
@@ -2596,25 +2630,55 @@ mod tests {
 
     #[test]
     fn switch_case_indentation() {
+        // Default: indent_switch_case=true, so case labels are at switch-body level
+        // and case bodies are one further level in.
         let src = "void f(int x){switch(x){case 1:y=1;break;case 2:y=2;break;default:y=0;break;}}";
         let out = fmt(src);
-        // case/default labels must be at switch indent level (4 spaces, not 8).
         assert!(
-            out.lines().any(|l| l == "    case 1:"),
-            "case 1 not at switch level:\n{out}"
+            out.lines().any(|l| l == "        case 1:"),
+            "case 1 not at switch-body level:\n{out}"
         );
         assert!(
-            out.lines().any(|l| l == "    case 2:"),
-            "case 2 not at switch level:\n{out}"
+            out.lines().any(|l| l == "        case 2:"),
+            "case 2 not at switch-body level:\n{out}"
+        );
+        assert!(
+            out.lines().any(|l| l == "        default:"),
+            "default not at switch-body level:\n{out}"
+        );
+        // Case body must be indented one further level (12 spaces at func level 1).
+        assert!(
+            out.lines().any(|l| l.starts_with("            y")),
+            "case body not indented deeper than label:\n{out}"
+        );
+    }
+
+    #[test]
+    fn switch_case_indentation_disabled() {
+        use crate::config::{IndentConfig, IndentStyle};
+        let cfg = Config {
+            indent: IndentConfig {
+                style: IndentStyle::Spaces,
+                width: 4,
+                indent_switch_case: false,
+            },
+            ..Config::default()
+        };
+        let src = "void f(int x){switch(x){case 1:y=1;break;default:y=0;break;}}";
+        let out = fmt_with(src, &cfg);
+        // When disabled, case labels dedent to the switch level (4 spaces).
+        assert!(
+            out.lines().any(|l| l == "    case 1:"),
+            "case 1 not dedented to switch level:\n{out}"
         );
         assert!(
             out.lines().any(|l| l == "    default:"),
-            "default not at switch level:\n{out}"
+            "default not dedented to switch level:\n{out}"
         );
-        // Body inside case must be indented one further level (8 spaces).
+        // Case body at switch-body level (8 spaces).
         assert!(
             out.lines().any(|l| l.starts_with("        y")),
-            "case body not indented deeper than label:\n{out}"
+            "case body not at switch-body level:\n{out}"
         );
     }
 
@@ -3252,7 +3316,7 @@ mod tests {
     fn indent_style_tabs() {
         use crate::config::{IndentConfig, IndentStyle};
         let cfg = Config {
-            indent: IndentConfig { style: IndentStyle::Tabs, width: 4 },
+            indent: IndentConfig { style: IndentStyle::Tabs, width: 4, indent_switch_case: true },
             ..Config::default()
         };
         let src = "void f(int x) { if (x > 0) { foo(x); } }\n";
@@ -3267,7 +3331,7 @@ mod tests {
     fn indent_style_tabs_idempotent() {
         use crate::config::{IndentConfig, IndentStyle};
         let cfg = Config {
-            indent: IndentConfig { style: IndentStyle::Tabs, width: 4 },
+            indent: IndentConfig { style: IndentStyle::Tabs, width: 4, indent_switch_case: true },
             ..Config::default()
         };
         let src = "void f() {\n\tif (x) {\n\t\tfoo();\n\t}\n}\n";

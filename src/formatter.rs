@@ -3309,6 +3309,29 @@ mod tests {
     }
 
     #[test]
+    fn space_inside_parens_false() {
+        // Default: no spaces inside parens — matches uncrustify sp_inside_paren=remove.
+        let src = "void f(int x) { int z = (x + 1); if (z > 0) foo(z); }\n";
+        let out = fmt(src);
+        assert!(out.contains("f(int x)"), "decl parens: {out}");
+        assert!(out.contains("(x + 1)"), "expr parens: {out}");
+        assert!(out.contains("if (z > 0)"), "keyword parens: {out}");
+        assert!(out.contains("foo(z)"), "call parens: {out}");
+    }
+
+    #[test]
+    fn space_inside_parens_true() {
+        let mut cfg = Config::default();
+        cfg.spacing.space_inside_parens = true;
+        let src = "void f(int x) { int z = (x + 1); if (z > 0) foo(z); }\n";
+        let out = fmt_with(src, &cfg);
+        assert!(out.contains("f( int x )"), "decl parens: {out}");
+        assert!(out.contains("( x + 1 )"), "expr parens: {out}");
+        assert!(out.contains("if ( z > 0 )"), "keyword parens: {out}");
+        assert!(out.contains("foo( z )"), "call parens: {out}");
+    }
+
+    #[test]
     fn space_inside_parens_continuation_alignment() {
         // When space_inside_parens is enabled the leading space shifts the first
         // argument by one column; continuation lines must align with that shifted

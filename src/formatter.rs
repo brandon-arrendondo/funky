@@ -853,11 +853,13 @@ impl<'src> Fmt<'src> {
         ) {
             return true;
         }
-        // `)` followed by `*`/`&` is a pointer declarator only when the `)`
-        // closed a cast paren — e.g. `(int) *p` dereference vs `(cast*) name`.
-        // Plain expression parens `(expr) * value` are multiplication.
+        // `)` followed by `*`/`&`: never a pointer declarator after a cast.
+        // `(type)*ptr` is cast + dereference; `(type*)` has the `*` inside.
+        // Only non-cast `)` (e.g. function return type in a fn-ptr context)
+        // could introduce a declarator, but those are handled by the
+        // fn-ptr-declarator check in the LParen arm, not here.
         if self.prev == Some(TokenKind::RParen) {
-            return self.last_was_cast_close;
+            return false;
         }
         // An identifier (user-defined type) followed by `*`/`&` is a pointer
         // declarator only when the tokens after the operator look like a name,
@@ -1255,6 +1257,16 @@ impl<'src> Fmt<'src> {
             return self.config.spacing.space_after_comma;
         }
 
+        // After a cast-close `)`, `*` and `&` are always unary (dereference /
+        // address-of). Check this before the binary-op path which would otherwise
+        // see RParen.ends_expr() == true and add a space.
+        if self.last_was_cast_close
+            && prev == TokenKind::RParen
+            && matches!(next, TokenKind::Star | TokenKind::Amp)
+        {
+            return self.config.spacing.space_after_cast;
+        }
+
         // Binary operators — space on both sides if configured
         if next.is_binary_op() {
             if prev.ends_expr() {
@@ -1423,11 +1435,44 @@ impl<'src> Fmt<'src> {
                                     self.write("}");
                                 } else {
                                     self.write(" ");
-                                    for (idx, (lex, kind)) in content.iter().enumerate() {
-                                        if idx > 0 && !matches!(kind, TokenKind::Comma) {
+                                    let mut prev_kind = TokenKind::LBrace;
+                                    let mut suppress = false;
+                                    for (_idx, (lex, kind)) in content.iter().enumerate() {
+                                        let need_space = !suppress
+                                            && !matches!(kind, TokenKind::Comma)
+                                            && !matches!(
+                                                prev_kind,
+                                                TokenKind::LBrace
+                                                    | TokenKind::Dot
+                                                    | TokenKind::Arrow
+                                                    | TokenKind::LParen
+                                            )
+                                            // No space before . or -> only when it's member
+                                            // access (prev ends an expression). Designated
+                                            // initializer .field comes after , or { and
+                                            // does need a space.
+                                            && !(matches!(kind, TokenKind::Dot | TokenKind::Arrow)
+                                                && prev_kind.ends_expr());
+                                        if need_space {
                                             self.write(" ");
                                         }
+                                        suppress = false;
                                         self.write(lex);
+                                        // Unary context: after comma, LBrace, or LParen,
+                                        // the next - + * & is unary — suppress space after it.
+                                        if matches!(
+                                            kind,
+                                            TokenKind::Minus
+                                                | TokenKind::Plus
+                                                | TokenKind::Star
+                                                | TokenKind::Amp
+                                        ) && matches!(
+                                            prev_kind,
+                                            TokenKind::Comma | TokenKind::LBrace | TokenKind::LParen
+                                        ) {
+                                            suppress = true;
+                                        }
+                                        prev_kind = *kind;
                                     }
                                     self.write(" }");
                                 }
@@ -1850,7 +1895,11 @@ impl<'src> Fmt<'src> {
                     // comment) the operator is always unary, never binary — even
                     // if the previous emitted token was a CommentBlock which
                     // satisfies ends_expr().
-                    let is_binary = !self.at_line_start && self.prev.is_some_and(|p| p.ends_expr());
+                    // After a cast-close `)`, * and & are always unary (dereference /
+                    // address-of), never binary multiplication / bitwise-and.
+                    let is_binary = !self.at_line_start
+                        && !self.last_was_cast_close
+                        && self.prev.is_some_and(|p| p.ends_expr());
                     if self.at_line_start {
                         self.indent();
                     } else if self.needs_space(tok.kind) {
@@ -3136,6 +3185,36 @@ mod tests {
             "user-defined type cast should have no space: {out}"
         );
     }
+
+    #[test]
+    fn cast_followed_by_dereference_no_space() {
+        // (type)*ptr — cast + dereference must not gain a space (space_after_cast=false).
+        let src = "void f() { uint32_t x = (uint32_t)*ptr; int y = (int)*p; }\n";
+        let out = fmt(src);
+        assert!(out.contains("(uint32_t)*ptr"), "cast+deref uint32_t: {out}");
+        assert!(out.contains("(int)*p"), "cast+deref int: {out}");
+    }
+
+    #[test]
+    fn designated_initializer_no_space_around_dot() {
+        // {.field = val} — dot must have no space after it, but space before
+        // when it follows a comma (not after an expression).
+        let src = "void f() { tlv_t r = {.value = 1, .len = 2}; }\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("{ .value = 1, .len = 2 }"),
+            "designated init spacing: {out}"
+        );
+    }
+
+    #[test]
+    fn initializer_negative_literal_no_space() {
+        // {1, -2, -95} — unary minus inside a small initializer must not gain a space.
+        let src = "void f() { char p[] = {1, -2, -95}; }\n";
+        let out = fmt(src);
+        assert!(out.contains("{ 1, -2, -95 }"), "negative literals: {out}");
+    }
+
 
     #[test]
     fn cast_user_defined_pointer_no_space() {

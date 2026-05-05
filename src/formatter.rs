@@ -3141,6 +3141,29 @@ mod tests {
     }
 
     #[test]
+    fn space_before_keyword_paren_true() {
+        // Default: space between control keyword and `(`.
+        let src = "void f() { for (int i=0;i<10;i++){} while(x){} if(x){} switch(x){} }\n";
+        let out = fmt(src);
+        assert!(out.contains("for ("), "for: {out}");
+        assert!(out.contains("while ("), "while: {out}");
+        assert!(out.contains("if ("), "if: {out}");
+        assert!(out.contains("switch ("), "switch: {out}");
+    }
+
+    #[test]
+    fn space_before_keyword_paren_false() {
+        let mut cfg = Config::default();
+        cfg.spacing.space_before_keyword_paren = false;
+        let src = "void f() { for (int i=0;i<10;i++){} while (x){} if (x){} switch (x){} }\n";
+        let out = fmt_with(src, &cfg);
+        assert!(out.contains("for("), "for: {out}");
+        assert!(out.contains("while("), "while: {out}");
+        assert!(out.contains("if("), "if: {out}");
+        assert!(out.contains("switch("), "switch: {out}");
+    }
+
+    #[test]
     fn unary_after_assignment_space() {
         // = &ptr, = -1, = *ptr, = +val must preserve space after `=`.
         let src = "void f() { int a = &ptr; int b = -1; int c = *ptr; int d = +val; }\n";

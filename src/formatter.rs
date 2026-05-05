@@ -548,7 +548,7 @@ impl<'src> Fmt<'src> {
             j
         };
         let mut i = skip_ws(self.pos);
-        // Must start with * or &
+        // Must start with * or & (function-pointer or C++ reference-to-function).
         if !matches!(
             self.tokens.get(i).map(|t| t.kind),
             Some(TokenKind::Star | TokenKind::Amp)
@@ -557,14 +557,22 @@ impl<'src> Fmt<'src> {
         }
         i += 1;
         i = skip_ws(i);
-        // Then an identifier (the function-pointer name)
+        // Then an identifier (the function-pointer/reference name)
         if !matches!(self.tokens.get(i).map(|t| t.kind), Some(TokenKind::Ident)) {
             return false;
         }
         i += 1;
         i = skip_ws(i);
-        // Then immediately `)`
-        matches!(self.tokens.get(i).map(|t| t.kind), Some(TokenKind::RParen))
+        // Then `)` …
+        if !matches!(self.tokens.get(i).map(|t| t.kind), Some(TokenKind::RParen)) {
+            return false;
+        }
+        i += 1;
+        i = skip_ws(i);
+        // … immediately followed by `(` (the parameter list).
+        // This distinguishes `void (*fp)(int)` from a call like `foo(&x)` where
+        // `)` closes the argument list and is followed by `;`, `,`, `)`, etc.
+        matches!(self.tokens.get(i).map(|t| t.kind), Some(TokenKind::LParen))
     }
 
     /// True if the next token (skipping only `Whitespace`, not `Newline`) is a

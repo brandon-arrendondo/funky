@@ -337,15 +337,33 @@ impl<'src> Fmt<'src> {
     /// non-declaration statement in that form.  Scans ahead skipping WS and any
     /// leading `*`/`&` (pointer/reference declarators) to find the variable name.
     fn ident_starts_decl(&self) -> bool {
+        // Scan forward to decide if this Ident is the start of a declaration.
+        // Patterns we accept:
+        //   TypeName varName         — user typedef: Ident Ident
+        //   ATTR_MACRO const T* var  — attribute macro + qualifiers: Ident Keyword+ Ident
+        // We stop at newlines because declarations are always on one line.
         let mut i = self.pos;
         loop {
             let Some(tk) = self.tokens.get(i) else {
                 return false;
             };
             match tk.kind {
-                TokenKind::Whitespace | TokenKind::Newline => i += 1,
-                TokenKind::Star => i += 1,
+                // Stop at newlines: `TypeName varName` declarations are always
+                // on one line. Skipping newlines would misidentify adjacent macro
+                // calls (e.g. `EXPECT_ABORT_BEGIN\n    TEST_ASSERT(...)`) as decls.
+                TokenKind::Newline => return false,
+                TokenKind::Whitespace | TokenKind::Star => i += 1,
+                // A bare Ident following is the variable name — declaration confirmed.
                 TokenKind::Ident => return true,
+                // A Keyword (const, volatile, unsigned, etc.) after the leading Ident
+                // means this is an attribute-macro + qualifier pattern like
+                // `UNITY_PTR_ATTRIBUTE const float* p` — keep scanning.
+                TokenKind::Keyword
+                | TokenKind::KwStruct
+                | TokenKind::KwClass
+                | TokenKind::KwUnion
+                | TokenKind::KwEnum
+                | TokenKind::KwTypename => i += 1,
                 _ => return false,
             }
         }
@@ -396,16 +414,23 @@ impl<'src> Fmt<'src> {
         if !self.at_func_stmt_start || !self.in_var_decl_block {
             return;
         }
-        // Comments before the first declaration are transparent — a preamble
-        // `/* ... */` does not end the declaration run before it has started.
-        // Once we have seen at least one declaration (saw_func_decl = true),
-        // a STANDALONE comment marks the end of the block. Trailing inline
-        // comments (`int x = 0; /* note */`) are not at line start and must
-        // not trigger the transition or force_blank_after_decls.
+        // Comments are handled by two rules:
+        //   1. Inline trailing comments (not at line start) are always transparent.
+        //   2. Standalone comments (at line start) are transparent when they are
+        //      *between* declarations — i.e. more declarations follow — so that
+        //      section comments like `/* WHEN ... */` don't split the block.
+        //      A standalone comment ends the block only when it precedes code.
         if matches!(kind, TokenKind::CommentLine | TokenKind::CommentBlock) {
-            if !self.saw_func_decl || !self.at_line_start {
-                return;
+            if !self.at_line_start {
+                return; // inline trailing comment — never ends the block
             }
+            if !self.saw_func_decl {
+                return; // before any declaration — preamble comment is transparent
+            }
+            if self.comment_precedes_decl() {
+                return; // comment sits between declarations — transparent
+            }
+            // Otherwise fall through: standalone comment before code ends the block.
         }
         self.at_func_stmt_start = false;
         let is_decl =
@@ -566,6 +591,50 @@ impl<'src> Fmt<'src> {
             self.tokens.get(i),
             Some(t) if t.kind == TokenKind::CommentLine && t.span.line == source_line
         )
+    }
+
+    /// Scans forward from `self.pos` skipping whitespace, newlines, and any
+    /// comments, then returns true when the first real token is a declaration
+    /// start.  Used to decide whether a standalone comment between declarations
+    /// is transparent (followed by another declaration) or ends the var-decl
+    /// block (followed by code).
+    fn comment_precedes_decl(&self) -> bool {
+        let mut i = self.pos;
+        loop {
+            let Some(tk) = self.tokens.get(i) else {
+                return false;
+            };
+            match tk.kind {
+                TokenKind::Whitespace | TokenKind::Newline => i += 1,
+                TokenKind::CommentLine | TokenKind::CommentBlock => i += 1,
+                kind => {
+                    return Self::is_decl_start(kind)
+                        || (kind == TokenKind::Ident && {
+                            // Temporarily advance past this ident to run ident_starts_decl
+                            // logic inline (we can't call self.ident_starts_decl() since it
+                            // reads from self.pos).
+                            let mut j = i + 1;
+                            loop {
+                                let Some(t2) = self.tokens.get(j) else {
+                                    break false;
+                                };
+                                match t2.kind {
+                                    TokenKind::Newline => break false,
+                                    TokenKind::Whitespace | TokenKind::Star => j += 1,
+                                    TokenKind::Ident => break true,
+                                    TokenKind::Keyword
+                                    | TokenKind::KwStruct
+                                    | TokenKind::KwClass
+                                    | TokenKind::KwUnion
+                                    | TokenKind::KwEnum
+                                    | TokenKind::KwTypename => j += 1,
+                                    _ => break false,
+                                }
+                            }
+                        });
+                }
+            }
+        }
     }
 
     // ── Small initializer detection ───────────────────────────────────────────
@@ -2884,6 +2953,53 @@ mod tests {
         assert!(
             out.contains("data;\n\n"),
             "blank line must follow decl even when preceded by a block comment: {out}"
+        );
+    }
+
+    #[test]
+    fn var_decl_block_comment_between_decls_is_transparent() {
+        // A section comment between two declarations must not end the var-decl
+        // block. The blank line should appear after the last declaration, not
+        // before the intermediate comment.
+        let src = "void f(void) {\n    int x = 0;\n    /* WHEN */\n    int y = 1;\n    use(x, y);\n}\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("int y = 1;\n\n"),
+            "blank line must follow last decl, not appear before mid-block comment:\n{out}"
+        );
+        // No blank line should be inserted between declarations.
+        assert!(
+            !out.contains("int x = 0;\n\n"),
+            "no blank line should appear after first decl:\n{out}"
+        );
+    }
+
+    #[test]
+    fn var_decl_block_macro_calls_not_treated_as_decls() {
+        // Adjacent macro calls on separate lines (MACRO_A\nMACRO_B(...)) must
+        // not be mistaken for `TypeName varName` declarations.
+        let src = "void f(void) {\n    int x = 0;\n    EXPECT_BEGIN\n    ASSERT(x);\n    VERIFY_END\n}\n";
+        let out = fmt(src);
+        // No spurious blank line between ASSERT(...); and VERIFY_END.
+        assert!(
+            !out.contains("ASSERT(x);\n\n"),
+            "no blank line should appear between macro calls:\n{out}"
+        );
+    }
+
+    #[test]
+    fn var_decl_block_attribute_macro_plus_const_type_is_decl() {
+        // `ATTR_MACRO const Type* var = ...` must be recognized as a declaration
+        // so it stays in the var-decl block.
+        let src = "void f(void) {\n    int n = 4;\n    ATTR const float* p = buf;\n    use(p);\n}\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("buf;\n\n"),
+            "blank line must follow last decl (ATTR const float* p):\n{out}"
+        );
+        assert!(
+            !out.contains("int n = 4;\n\n"),
+            "no blank line should split the var-decl block:\n{out}"
         );
     }
 

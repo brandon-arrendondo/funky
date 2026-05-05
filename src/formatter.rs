@@ -1223,7 +1223,10 @@ impl<'src> Fmt<'src> {
                 return self.config.spacing.space_before_call_paren;
             }
             if matches!(prev, TokenKind::RParen) {
-                // e.g. cast or function pointer call — no extra space
+                // Cast: honour space_after_cast; function-pointer call: no space.
+                if self.last_was_cast_close {
+                    return self.config.spacing.space_after_cast;
+                }
                 return false;
             }
             return true;
@@ -3088,13 +3091,31 @@ mod tests {
 
     #[test]
     fn cast_double_cast_no_space() {
-        // Chained casts: (double)(int)x — no space between the two parens.
+        // Chained casts: (double)(int)x — no space between the two parens (default).
         let src = "void f() { double d = (double)(int)x; }\n";
         let out = fmt(src);
         assert!(
             out.contains("(double)(int)x"),
             "double cast should have no space between: {out}"
         );
+    }
+
+    #[test]
+    fn cast_space_after_cast_true() {
+        let mut cfg = Config::default();
+        cfg.spacing.space_after_cast = true;
+        // Primitive cast before identifier.
+        let src = "void f() { int x = (int)3.14; }\n";
+        let out = fmt_with(src, &cfg);
+        assert!(out.contains("(int) 3.14"), "cast+ident: {out}");
+        // Cast before parenthesised subexpression.
+        let src = "void f() { int y = (int)(x + 1); }\n";
+        let out = fmt_with(src, &cfg);
+        assert!(out.contains("(int) (x + 1)"), "cast+paren: {out}");
+        // Chained casts: space only after the innermost cast.
+        let src = "void f() { double d = (double)(int)x; }\n";
+        let out = fmt_with(src, &cfg);
+        assert!(out.contains("(double) (int) x"), "chained casts: {out}");
     }
 
     #[test]

@@ -48,6 +48,12 @@ struct Fmt<'src> {
     case_body_stack: Vec<bool>,
     /// Current preprocessor #if nesting depth (used for pp_indent).
     pp_depth: u32,
+    /// Set when `operator` keyword is emitted; cleared on the next non-ws token
+    /// so that the overloaded operator symbol gets no surrounding space.
+    after_operator_kw: bool,
+    /// Set when an operator-overload symbol is emitted (i.e. `after_operator_kw`
+    /// was true), so the following `(` is treated as a call paren (no space).
+    last_was_operator_overload: bool,
     /// Number of class/struct/union bodies we are currently inside — used to dedent access specifiers.
     class_depth: u32,
     /// Set when `switch` keyword is emitted; cleared once its `{` is consumed.
@@ -131,6 +137,8 @@ impl<'src> Fmt<'src> {
             switch_depth: 0,
             case_body_stack: Vec::new(),
             pp_depth: 0,
+            after_operator_kw: false,
+            last_was_operator_overload: false,
             class_depth: 0,
             pending_switch: false,
             pending_type: false,
@@ -292,6 +300,14 @@ impl<'src> Fmt<'src> {
         self.prev = Some(kind);
         self.last_was_template_close = false;
         self.last_was_cast_close = false;
+        // When `after_operator_kw` is true, we just emitted the overload symbol;
+        // record that so the following `(` gets call-paren spacing.
+        // For `operator[]` and `operator()`, the closing `]`/`)` must keep the
+        // flag alive so that the parameter-list `(` is also treated as a call paren.
+        self.last_was_operator_overload = self.after_operator_kw
+            || (self.last_was_operator_overload
+                && matches!(kind, TokenKind::RBracket | TokenKind::RParen));
+        self.after_operator_kw = false;
     }
 
     fn space(&mut self) {
@@ -1031,13 +1047,17 @@ impl<'src> Fmt<'src> {
         }
         // skip a qualified name (Ident :: Ident ...)
         let mut found_name = false;
+        let mut last_was_operator_kw = false;
         while i < self.tokens.len() {
             match self.tokens[i].kind {
                 TokenKind::Ident | TokenKind::Keyword => {
+                    last_was_operator_kw = self.tokens[i].kind == TokenKind::Keyword
+                        && self.tokens[i].lexeme == "operator";
                     found_name = true;
                     i += 1;
                 }
                 TokenKind::ColonColon => {
+                    last_was_operator_kw = false;
                     i += 1;
                 }
                 TokenKind::Whitespace | TokenKind::Newline | TokenKind::PreprocLine => {
@@ -1048,6 +1068,39 @@ impl<'src> Fmt<'src> {
         }
         if !found_name {
             return false;
+        }
+        // If the name ended with `operator`, skip the overloaded symbol so the
+        // following `(` is seen as the declaration terminator.
+        if last_was_operator_kw {
+            while i < self.tokens.len()
+                && matches!(
+                    self.tokens[i].kind,
+                    TokenKind::Whitespace | TokenKind::Newline
+                )
+            {
+                i += 1;
+            }
+            // Skip one operator-symbol token (=, +=, ==, [], (), etc.)
+            let op_kind = self.tokens.get(i).map(|t| t.kind);
+            if op_kind.is_some_and(|k| {
+                k.is_binary_op()
+                    || matches!(
+                        k,
+                        TokenKind::PlusPlus
+                            | TokenKind::MinusMinus
+                            | TokenKind::Bang
+                            | TokenKind::Tilde
+                            | TokenKind::LParen
+                            | TokenKind::LBracket
+                    )
+            }) {
+                i += 1;
+                // For `operator()` and `operator[]` also skip the closing bracket.
+                let closing = self.tokens.get(i).map(|t| t.kind);
+                if matches!(closing, Some(TokenKind::RParen | TokenKind::RBracket)) {
+                    i += 1;
+                }
+            }
         }
         while i < self.tokens.len()
             && matches!(
@@ -1143,6 +1196,14 @@ impl<'src> Fmt<'src> {
 
     /// Should a space be emitted before `next`, given the last emitted token `prev`?
     fn needs_space(&self, next: TokenKind) -> bool {
+        // The token immediately following `operator` is the overloaded symbol —
+        // never add space between `operator` and `=`, `+=`, `==`, `[]`, etc.
+        // Exception: `operator new` and `operator delete` are keyword operators
+        // that do need a space.
+        if self.after_operator_kw && !matches!(next, TokenKind::KwNew | TokenKind::KwDelete) {
+            return false;
+        }
+
         let prev = match self.prev {
             Some(k) => k,
             None => return false,
@@ -1230,6 +1291,13 @@ impl<'src> Fmt<'src> {
 
         // Space before `(` depends on context
         if next == TokenKind::LParen {
+            // After an operator overload symbol (`operator=`, `operator+=`, `operator[]`,
+            // `operator new`, etc.) the `(` opens the parameter list — treat it as a
+            // call paren. Check before is_control_kw so `operator new(` doesn't get
+            // keyword-paren spacing.
+            if self.last_was_operator_overload {
+                return self.config.spacing.space_before_call_paren;
+            }
             if prev.is_control_kw() {
                 return self.config.spacing.space_before_keyword_paren;
             }
@@ -2062,6 +2130,10 @@ impl<'src> Fmt<'src> {
 
                     self.write(tok.lexeme);
                     self.set_prev(tok.kind);
+                    // `operator` keyword — suppress spacing before the overloaded symbol.
+                    if tok.kind == TokenKind::Keyword && tok.lexeme == "operator" {
+                        self.after_operator_kw = true;
+                    }
                 }
             }
         }
@@ -4211,6 +4283,66 @@ mod tests {
         assert!(
             out.lines().any(|l| l == "    #define PLATFORM \"linux\""),
             "#define after #elif must be at depth 1:\n{out}"
+        );
+    }
+
+    #[test]
+    fn operator_overload_no_space_around_symbol() {
+        let src = "class Foo {\n    Foo &operator=(const Foo &) = delete;\n    Foo &operator+=(const Foo &other);\n    bool operator==(const Foo &) const;\n    bool operator!=(const Foo &) const;\n};\n";
+        let out = fmt(src);
+        assert!(
+            out.lines().any(|l| l.contains("operator=(const")),
+            "operator= must have no space around =:\n{out}"
+        );
+        assert!(
+            out.lines().any(|l| l.contains("operator+=(const")),
+            "operator+= must have no space around +=:\n{out}"
+        );
+        assert!(
+            out.lines().any(|l| l.contains("operator==(const")),
+            "operator== must have no space around ==:\n{out}"
+        );
+        assert!(
+            out.lines().any(|l| l.contains("operator!=(const")),
+            "operator!= must have no space around !=:\n{out}"
+        );
+    }
+
+    #[test]
+    fn operator_overload_ref_aligned_to_name() {
+        let src = "class Foo {\n    Foo &operator+=(const Foo &other);\n};\n";
+        let out = fmt(src);
+        assert!(
+            out.lines().any(|l| l.contains("Foo &operator+=")),
+            "& must be aligned to name in operator+= return type:\n{out}"
+        );
+    }
+
+    #[test]
+    fn operator_new_delete_space() {
+        let src = "class Foo {\n    void *operator new(size_t);\n    void operator delete(void *);\n};\n";
+        let out = fmt(src);
+        assert!(
+            out.lines().any(|l| l.contains("operator new(")),
+            "operator new must have space before new:\n{out}"
+        );
+        assert!(
+            out.lines().any(|l| l.contains("operator delete(")),
+            "operator delete must have space before delete:\n{out}"
+        );
+    }
+
+    #[test]
+    fn operator_subscript_and_call() {
+        let src = "class Foo {\n    int &operator[](int i);\n    int operator()(int x);\n};\n";
+        let out = fmt(src);
+        assert!(
+            out.lines().any(|l| l.contains("operator[](int")),
+            "operator[] must not have space before (:\n{out}"
+        );
+        assert!(
+            out.lines().any(|l| l.contains("operator()(int")),
+            "operator() must not have space before (:\n{out}"
         );
     }
 }

@@ -36,7 +36,7 @@ todo-sqlite-cli done <id>   # after committing
 
 **`BraceCtx` stack** — tracks what opened each `{`: `Block`, `Type`, `Namespace`, `Function`, `Other`. Used to decide brace placement, whether a `;` follows `}`, and `typedef struct { } Name` (name stays on same line as `}`).
 
-**Preprocessor is opaque** — `PreprocLine` tokens are passed through verbatim (only newline style is normalized). Do not apply spacing rules inside them.
+**Preprocessor is opaque** — `PreprocLine` tokens are passed through verbatim (only newline style is normalized). Do not apply spacing rules inside them. Funky does **not** implement `pp_indent`-style indentation (indenting `#include`/`#define`/nested `#if` relative to `#if` nesting depth, as uncrustify's `pp_indent = add` does). This is a known gap; implementing it would require tracking `#if`/`#elif`/`#else`/`#endif` depth inside the formatter and adding a config option.
 
 **Whitespace/Newline tokens are preserved** — the lexer keeps them so `skip_ws()` can count blank lines. The formatter discards them and manages all whitespace itself.
 

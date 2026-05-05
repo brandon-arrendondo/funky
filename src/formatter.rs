@@ -1803,6 +1803,10 @@ impl<'src> Fmt<'src> {
                         self.indent();
                     }
                     self.write(",");
+                    // A comma at statement level ends the current assignment expression.
+                    if self.paren_depth == 0 && self.bracket_depth == 0 {
+                        self.assign_col = None;
+                    }
                     if self.large_init_stack.last() == Some(&true) && self.paren_depth == 0 {
                         // If a trailing line comment follows on the same source line,
                         // let the CommentLine handler close the line instead.
@@ -1922,6 +1926,11 @@ fn trailing_comment_col(line: &str) -> Option<usize> {
                 && bytes.get(i + 2) == Some(&b'*')
                 && bytes.get(i + 3) == Some(&b'<')
             {
+                i += 1;
+                continue;
+            }
+            // Skip `://` — part of a URL (e.g. `https://`), not a comment.
+            if bytes[i + 1] == b'/' && i > 0 && bytes[i - 1] == b':' {
                 i += 1;
                 continue;
             }

@@ -333,6 +333,9 @@ struct Fmt<'src> {
     /// Set when `public`/`private`/`protected` is emitted so the following `:`
     /// gets a newline after it.
     in_access_label: bool,
+    /// Set when a goto label identifier is emitted at column 0; causes the
+    /// following `:` to emit a newline without applying normal spacing rules.
+    in_goto_label: bool,
     /// When true, the next call to `space()` is suppressed and the flag is
     /// cleared. Used to suppress the space between a pointer `*`/`&` and the
     /// following identifier in `name` pointer-alignment mode.
@@ -409,6 +412,7 @@ impl<'src> Fmt<'src> {
             pending_extern_c: false,
             in_case_label: false,
             in_access_label: false,
+            in_goto_label: false,
             suppress_next_space: false,
             template_depth: 0,
             last_was_template_close: false,
@@ -458,6 +462,18 @@ impl<'src> Fmt<'src> {
             }
         }
         self.skip_next_newline = false;
+    }
+
+    /// Return the kind of the next non-whitespace/newline token without consuming it.
+    fn peek_non_ws_kind(&self) -> Option<TokenKind> {
+        let mut j = self.pos;
+        while j < self.tokens.len() {
+            match self.tokens[j].kind {
+                TokenKind::Whitespace | TokenKind::Newline => j += 1,
+                k => return Some(k),
+            }
+        }
+        None
     }
 
     // ── Output helpers ────────────────────────────────────────────────────────
@@ -2191,8 +2207,12 @@ impl<'src> Fmt<'src> {
                 // ── Colon after case / default / access specifier / ternary ──
                 TokenKind::Colon => {
                     self.flush_blank_lines();
-                    // Ternary `:` gets a space before it; case/label/access do not.
-                    if self.ternary_depth > 0 && !self.in_case_label && !self.in_access_label {
+                    // Ternary `:` gets a space before it; case/label/access/goto do not.
+                    if self.ternary_depth > 0
+                        && !self.in_case_label
+                        && !self.in_access_label
+                        && !self.in_goto_label
+                    {
                         self.ternary_depth = self.ternary_depth.saturating_sub(1);
                         if !self.at_line_start {
                             self.space();
@@ -2211,6 +2231,10 @@ impl<'src> Fmt<'src> {
                         }
                     } else if self.in_access_label {
                         self.in_access_label = false;
+                        self.nl();
+                        self.skip_next_newline = true;
+                    } else if self.in_goto_label {
+                        self.in_goto_label = false;
                         self.nl();
                         self.skip_next_newline = true;
                     }
@@ -2452,6 +2476,25 @@ impl<'src> Fmt<'src> {
                         self.assign_col = Some(self.current_col + space);
                         self.assign_eol = false;
                     }
+                    self.set_prev(tok.kind);
+                }
+
+                // ── Goto labels: `identifier:` at statement level ─────────────
+                TokenKind::Ident
+                    if !self.config.indent.indent_goto_labels
+                        && self.at_line_start
+                        && self.paren_depth == 0
+                        && self.bracket_depth == 0
+                        && self.template_depth == 0
+                        && self.ternary_depth == 0
+                        && !self.in_case_label
+                        && !self.in_access_label
+                        && self.peek_non_ws_kind() == Some(TokenKind::Colon) =>
+                {
+                    self.flush_blank_lines();
+                    // Emit at column 0 — no indentation call.
+                    self.write(tok.lexeme);
+                    self.in_goto_label = true;
                     self.set_prev(tok.kind);
                 }
 
@@ -3138,6 +3181,7 @@ mod tests {
                 style: IndentStyle::Spaces,
                 width: 4,
                 indent_switch_case: false,
+                indent_goto_labels: false,
             },
             ..Config::default()
         };
@@ -3799,6 +3843,7 @@ mod tests {
                 style: IndentStyle::Tabs,
                 width: 4,
                 indent_switch_case: true,
+                indent_goto_labels: false,
             },
             ..Config::default()
         };
@@ -3818,6 +3863,7 @@ mod tests {
                 style: IndentStyle::Tabs,
                 width: 4,
                 indent_switch_case: true,
+                indent_goto_labels: false,
             },
             ..Config::default()
         };
@@ -5062,6 +5108,75 @@ mod tests {
         let open_count = out.chars().filter(|&c| c == '{').count();
         // fn body + outer-if body + inner-if body + inner-else body = 4
         assert_eq!(open_count, 4, "expected 4 braces:\n{out}");
+    }
+
+    // ── goto label indentation ────────────────────────────────────────────────
+
+    #[test]
+    fn goto_label_at_column_zero() {
+        let src = "void f() {\n    if (fail) goto error;\n    return;\nerror:\n    free(p);\n}\n";
+        let out = fmt(src);
+        // `error:` must appear at column 0 (no leading spaces).
+        assert!(
+            out.lines().any(|l| l == "error:"),
+            "goto label must be at column 0:\n{out}"
+        );
+    }
+
+    #[test]
+    fn goto_label_code_after_remains_indented() {
+        let src = "void f() {\n    goto done;\ndone:\n    return;\n}\n";
+        let out = fmt(src);
+        assert!(out.lines().any(|l| l == "done:"), "label at col 0:\n{out}");
+        assert!(
+            out.lines().any(|l| l == "    return;"),
+            "code after label must still be indented:\n{out}"
+        );
+    }
+
+    #[test]
+    fn goto_label_multiple_labels() {
+        let src = "void f() {\nerror_a:\n    cleanup_a();\nerror_b:\n    cleanup_b();\n}\n";
+        let out = fmt(src);
+        assert!(
+            out.lines().any(|l| l == "error_a:"),
+            "error_a at col 0:\n{out}"
+        );
+        assert!(
+            out.lines().any(|l| l == "error_b:"),
+            "error_b at col 0:\n{out}"
+        );
+    }
+
+    #[test]
+    fn goto_label_indent_goto_labels_true() {
+        // When indent_goto_labels = true, labels follow normal indentation.
+        use crate::config::IndentConfig;
+        let config = Config {
+            indent: IndentConfig {
+                indent_goto_labels: true,
+                ..IndentConfig::default()
+            },
+            ..Config::default()
+        };
+        let src = "void f() {\nerror:\n    cleanup();\n}\n";
+        let out = fmt_with(src, &config);
+        // Label should be indented at function body level (4 spaces).
+        assert!(
+            out.lines().any(|l| l == "    error:"),
+            "label must be indented when indent_goto_labels=true:\n{out}"
+        );
+    }
+
+    #[test]
+    fn goto_label_does_not_affect_ternary_colon() {
+        // A ternary `a ? b : c` must not be confused with a goto label.
+        let src = "void f() { int x = a ? b : c; }\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("a ? b : c"),
+            "ternary must keep spaces around colon:\n{out}"
+        );
     }
 
     #[test]

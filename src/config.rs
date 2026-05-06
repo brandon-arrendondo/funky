@@ -83,6 +83,11 @@ pub struct IndentConfig {
     /// the case body one further level (analogous to uncrustify's
     /// `indent_switch_case = <indent_columns>`).
     pub indent_switch_case: bool,
+    /// When `false` (default), goto labels are placed at column 0 regardless
+    /// of the current indentation level (analogous to uncrustify's
+    /// `indent_label = 1`).  Set to `true` to indent labels at the same level
+    /// as surrounding code.
+    pub indent_goto_labels: bool,
 }
 
 impl Default for IndentConfig {
@@ -91,6 +96,7 @@ impl Default for IndentConfig {
             style: IndentStyle::Spaces,
             width: 4,
             indent_switch_case: true,
+            indent_goto_labels: false,
         }
     }
 }
@@ -319,6 +325,7 @@ mod tests {
 style = "spaces"
 width = 4
 indent_switch_case = true
+indent_goto_labels = false
 
 [braces]
 style = "kr"
@@ -358,6 +365,7 @@ merge_line_comment              = false
 "#;
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.indent.width, 4);
+        assert!(!cfg.indent.indent_goto_labels);
         assert_eq!(cfg.braces.style, BraceStyle::Kr);
         assert_eq!(cfg.braces.extern_c_brace, ExternCBrace::Preserve);
         assert!(cfg.braces.add_braces_to_if);

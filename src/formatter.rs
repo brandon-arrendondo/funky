@@ -2193,6 +2193,10 @@ impl<'src> Fmt<'src> {
                     if closing_ctx != BraceCtx::ExternC && self.indent_level > 0 {
                         self.indent_level -= 1;
                     }
+                    // An `=` inside the brace body (e.g. the last enum value without a
+                    // trailing comma) leaves assign_col set. Clear it so `indent()` uses
+                    // normal indentation rather than aligning to the `=` column.
+                    self.assign_col = None;
                     self.flush_blank_lines();
                     self.ensure_own_line();
                     self.write("}");
@@ -5413,6 +5417,19 @@ mod tests {
         assert!(
             out.contains("i++) {") || out.contains("i < n; i++) {"),
             "for brace:\n{out}"
+        );
+    }
+
+    #[test]
+    fn enum_closing_brace_not_aligned_to_last_assign() {
+        // When the last enum value has no trailing comma, the `=` sets assign_col.
+        // The closing `}` must NOT align to that column — it goes at indent level 0.
+        let src = "enum foo {\n    A = 1,\n    B = 2\n};\n";
+        let out = fmt(src);
+        // `};` must appear at column 0, not indented to the `=` position
+        assert!(
+            out.lines().any(|l| l == "};"),
+            "closing `}};` should be at column 0:\n{out}"
         );
     }
 }

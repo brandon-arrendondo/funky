@@ -1,4 +1,4 @@
-use crate::config::{AlignCmtStyle, BraceStyle, Config, ExternCBrace, PointerAlign};
+use crate::config::{AlignCmtStyle, BraceStyle, Config, ExternCBrace, IndentStyle, PointerAlign};
 use crate::error::FunkyError;
 use crate::token::{Span, Token, TokenKind};
 
@@ -1942,6 +1942,31 @@ impl<'src> Fmt<'src> {
                     // flush at the start of a line (e.g. `\n*/` → `\n */`).
                     let normalized = if normalized.contains(&format!("{nl}*/")) {
                         normalized.replace(&format!("{nl}*/"), &format!("{nl} */"))
+                    } else {
+                        normalized
+                    };
+                    // When indent style is spaces, expand leading tabs in
+                    // continuation lines to spaces.  The leading whitespace
+                    // before the `*` on each continuation line is indentation,
+                    // not comment content, and should follow the indent style.
+                    let normalized = if self.config.indent.style == IndentStyle::Spaces {
+                        let tab_w = self.config.indent.width as usize;
+                        let mut out = String::with_capacity(normalized.len());
+                        let mut first = true;
+                        for line in normalized.split(nl) {
+                            if !first {
+                                out.push_str(nl);
+                            }
+                            first = false;
+                            // Expand each leading tab to tab_w spaces.
+                            let non_tab = line.trim_start_matches('\t');
+                            let n_tabs = line.len() - non_tab.len();
+                            for _ in 0..n_tabs * tab_w {
+                                out.push(' ');
+                            }
+                            out.push_str(non_tab);
+                        }
+                        out
                     } else {
                         normalized
                     };
@@ -4335,6 +4360,55 @@ mod tests {
         assert!(
             out.contains(" */") && !out.contains("  */"),
             "already-correct */ must not be double-spaced, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn block_comment_tab_continuation_expanded_to_spaces() {
+        // Source: two-tab indent before ` * text` — must become spaces.
+        let src = "\t\t/*\n\t\t * stdout is forbidden\n\t\t */\nint x;\n";
+        let out = fmt(src);
+        // Each leading \t should be expanded to indent_width (4) spaces.
+        assert!(
+            out.contains("         * stdout"),
+            "tabs in continuation line must be expanded to spaces:\n{out}"
+        );
+        assert!(
+            !out.contains('\t'),
+            "no tabs must remain in the output:\n{out}"
+        );
+    }
+
+    #[test]
+    fn block_comment_tab_continuation_tabs_style_preserved() {
+        // When indent.style = tabs, leading tabs in comment bodies must stay as tabs.
+        use crate::config::IndentConfig;
+        let cfg = Config {
+            indent: IndentConfig {
+                style: IndentStyle::Tabs,
+                width: 4,
+                indent_switch_case: true,
+                indent_goto_labels: false,
+            },
+            ..Config::default()
+        };
+        let src = "void f() {\n\t/*\n\t * note\n\t */\n}\n";
+        let out = fmt_with(src, &cfg);
+        assert!(
+            out.contains("\t * note"),
+            "tabs in continuation line must be preserved under tabs style:\n{out}"
+        );
+    }
+
+    #[test]
+    fn block_comment_mixed_leading_whitespace_expanded() {
+        // Mixed: spaces already present (no tab at very start of continuation).
+        let src = "void f() {\n    /*\n     * already spaces\n     */\n}\n";
+        let out = fmt(src);
+        // Already spaces — must remain unchanged (no extra expansion).
+        assert!(
+            out.contains("     * already spaces"),
+            "space-indented continuation must be left alone:\n{out}"
         );
     }
 

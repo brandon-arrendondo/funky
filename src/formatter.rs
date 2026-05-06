@@ -1058,6 +1058,109 @@ impl<'src> Fmt<'src> {
         }
     }
 
+    /// Returns `true` when the `RParen` immediately before `{` looks like it
+    /// closes a macro/function *call* at statement level rather than a function
+    /// *definition* parameter list.
+    ///
+    /// Heuristic: find the `(` that matches the `)`, then the identifier before
+    /// it, then look one step further.  If what precedes the identifier is a
+    /// statement boundary (`{`, `}`, `;`, preprocline) we are at the start of a
+    /// statement with no return-type — this is a macro call, not a definition.
+    /// If it is a type keyword, another identifier (return type), `*`, `&`, or
+    /// `>` (template close), it is a function definition.
+    ///
+    /// The check is skipped when we are inside a class body (`class_depth > 0`)
+    /// because constructors and inline methods have no return type yet still
+    /// qualify as definitions.
+    fn rparen_looks_like_call(&self) -> bool {
+        if self.class_depth > 0 {
+            return false; // inside a class: always a definition
+        }
+        if self.pos < 2 {
+            return false;
+        }
+        // Start one token before the current LBrace.
+        let mut i = self.pos - 2;
+        // Skip whitespace / comments between ) and {.
+        while matches!(
+            self.tokens[i].kind,
+            TokenKind::Whitespace
+                | TokenKind::Newline
+                | TokenKind::CommentBlock
+                | TokenKind::CommentLine
+        ) {
+            if i == 0 {
+                return false;
+            }
+            i -= 1;
+        }
+        if self.tokens[i].kind != TokenKind::RParen {
+            return false;
+        }
+        // Find the matching `(`.
+        let mut depth = 1usize;
+        loop {
+            if i == 0 {
+                return false;
+            }
+            i -= 1;
+            match self.tokens[i].kind {
+                TokenKind::RParen => depth += 1,
+                TokenKind::LParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        // i = the `(`.  Find the name token immediately before it.
+        while i > 0 {
+            i -= 1;
+            if !matches!(
+                self.tokens[i].kind,
+                TokenKind::Whitespace | TokenKind::Newline
+            ) {
+                break;
+            }
+        }
+        // i = the function/macro name token.
+        // Now scan backward past the qualified name (ColonColon, Tilde) to find
+        // the token that precedes the entire name.
+        loop {
+            if i == 0 {
+                return false; // start of file without return type: treat as fn def
+            }
+            i -= 1;
+            match self.tokens[i].kind {
+                TokenKind::Whitespace | TokenKind::Newline => continue,
+                // Parts of a qualified/scoped name — keep scanning.
+                TokenKind::ColonColon | TokenKind::Tilde => continue,
+                // A return type — this is a function definition.
+                TokenKind::Ident
+                | TokenKind::Keyword
+                | TokenKind::KwStruct
+                | TokenKind::KwClass
+                | TokenKind::KwUnion
+                | TokenKind::KwEnum
+                | TokenKind::KwTypename
+                | TokenKind::Star
+                | TokenKind::Amp
+                | TokenKind::Gt
+                | TokenKind::RParen => return false,
+                // Statement boundary with no preceding return type — macro call.
+                TokenKind::Semi
+                | TokenKind::LBrace
+                | TokenKind::RBrace
+                | TokenKind::PreprocLine => {
+                    return true;
+                }
+                _ => return false, // conservative: treat unknown context as fn def
+            }
+        }
+    }
+
     /// Returns `true` when the `RParen` immediately before `{` closes a
     /// control-flow construct (`if`, `while`, `for`, `switch`) rather than a
     /// function parameter list.  Scans backward past the `)…(` group and checks
@@ -1131,7 +1234,7 @@ impl<'src> Fmt<'src> {
             TokenKind::RParen => {
                 if self.pending_switch {
                     BraceCtx::Switch
-                } else if self.rparen_closes_ctrl_flow() {
+                } else if self.rparen_closes_ctrl_flow() || self.rparen_looks_like_call() {
                     BraceCtx::Block
                 } else {
                     BraceCtx::Function
@@ -5108,6 +5211,54 @@ mod tests {
         let open_count = out.chars().filter(|&c| c == '{').count();
         // fn body + outer-if body + inner-if body + inner-else body = 4
         assert_eq!(open_count, 4, "expected 4 braces:\n{out}");
+    }
+
+    // ── nl_fcall_brace: macro call + block body ───────────────────────────────
+
+    #[test]
+    fn macro_call_brace_stays_on_same_line() {
+        // DL_FOREACH_SAFE-style macro call: `{` must NOT be moved to a new line.
+        let src = "void f() { DL_FOREACH_SAFE(head, n, tmp) { use(n); } }\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("DL_FOREACH_SAFE(head, n, tmp) {"),
+            "macro-call brace must stay on same line:\n{out}"
+        );
+    }
+
+    #[test]
+    fn macro_call_brace_no_space_normalized() {
+        // Source has `MACRO(){` with no space — formatter should add the space.
+        let src = "void f() { MACRO(a, b){\nwork();\n} }\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("MACRO(a, b) {"),
+            "space must be added before macro-call brace:\n{out}"
+        );
+    }
+
+    #[test]
+    fn fn_def_brace_still_on_own_line() {
+        // Regular function definition must still put `{` on its own line with fn_brace_newline.
+        let src = "int foo(int x) { return x; }\n";
+        let out = fmt(src);
+        // With fn_brace_newline=true (default), `{` goes on its own line.
+        assert!(
+            out.contains("int foo(int x)\n{"),
+            "fn def brace must go on own line:\n{out}"
+        );
+    }
+
+    #[test]
+    fn constructor_brace_still_on_own_line() {
+        // Constructor inside a class body — must still apply fn_brace_newline.
+        let src = "class Foo { Foo(int x) { m_ = x; } };\n";
+        let out = fmt(src);
+        // The constructor `{` should be on its own line.
+        assert!(
+            out.contains("Foo(int x)\n"),
+            "constructor brace must go on own line:\n{out}"
+        );
     }
 
     // ── goto label indentation ────────────────────────────────────────────────

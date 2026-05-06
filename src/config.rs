@@ -18,18 +18,12 @@ pub struct Config {
 
 // ── Preprocessor ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct PreprocConfig {
     /// Indent preprocessor directives relative to their `#if`/`#ifdef`/`#ifndef`
     /// nesting depth (analogous to uncrustify's `pp_indent = add`). Default false.
     pub pp_indent: bool,
-}
-
-impl Default for PreprocConfig {
-    fn default() -> Self {
-        Self { pp_indent: false }
-    }
 }
 
 // ── Ignore ───────────────────────────────────────────────────────────────────
@@ -127,6 +121,21 @@ pub struct BraceConfig {
     /// `while`, `switch`) are not affected and follow `style` as usual.
     /// Matches `nl_fdef_brace = add` in uncrustify.
     pub fn_brace_newline: bool,
+    /// Controls placement of the `{` in `extern "C" { }` linkage blocks.
+    /// `force_same_line` (default) always keeps `{` on the same line as
+    /// `extern "C"`, matching mainstream style guides (Google, LLVM).
+    /// `preserve` leaves the brace wherever the source has it, matching
+    /// uncrustify's default behaviour when no `nl_extern_brace` rule is set.
+    pub extern_c_brace: ExternCBrace,
+    /// Add braces to braceless single-statement `if` bodies (analogous to
+    /// uncrustify's `mod_full_brace_if = add`). Default false.
+    pub add_braces_to_if: bool,
+    /// Add braces to braceless single-statement `while` bodies (analogous to
+    /// uncrustify's `mod_full_brace_while = add`). Default false.
+    pub add_braces_to_while: bool,
+    /// Add braces to braceless single-statement `for` bodies (analogous to
+    /// uncrustify's `mod_full_brace_for = add`). Default false.
+    pub add_braces_to_for: bool,
 }
 
 impl Default for BraceConfig {
@@ -138,6 +147,10 @@ impl Default for BraceConfig {
             collapse_empty_body: true,
             expand_large_initializers: true,
             fn_brace_newline: true,
+            extern_c_brace: ExternCBrace::ForceSameLine,
+            add_braces_to_if: false,
+            add_braces_to_while: false,
+            add_braces_to_for: false,
         }
     }
 }
@@ -151,6 +164,17 @@ pub enum BraceStyle {
     Allman,
     /// Like K&R but `else`/`catch` start on a new line.
     Stroustrup,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternCBrace {
+    /// Always place `{` on the same line as `extern "C"` (Google/LLVM style).
+    #[default]
+    ForceSameLine,
+    /// Leave the brace wherever the source has it (matches uncrustify with no
+    /// `nl_extern_brace` rule).
+    Preserve,
 }
 
 // ── Spacing ──────────────────────────────────────────────────────────────────
@@ -173,6 +197,14 @@ pub struct SpacingConfig {
     /// Minimum number of spaces between code and an aligned trailing comment.
     /// Defaults to 1; increase to 2 or 3 to match uncrustify-style wider gaps.
     pub align_right_cmt_gap: usize,
+    /// Controls which trailing comments are normalized to `align_right_cmt_gap`
+    /// spaces.
+    /// `groups` (default) — only multi-line groups are aligned; a lone trailing
+    /// comment on a single line keeps the one space the formatter emits.
+    /// Matches uncrustify's default behaviour of leaving single comments alone.
+    /// `all` — every trailing comment (including single-line) is padded to at
+    /// least `align_right_cmt_gap` spaces.
+    pub align_right_cmt_style: AlignCmtStyle,
     /// Align `=` signs across consecutive enum value lines.
     /// 0 = disabled; any positive value enables alignment.
     pub align_enum_equ_span: usize,
@@ -195,6 +227,7 @@ impl Default for SpacingConfig {
             space_inside_angle_brackets: false,
             align_right_cmt_span: 3,
             align_right_cmt_gap: 3,
+            align_right_cmt_style: AlignCmtStyle::Groups,
             align_enum_equ_span: 1,
             align_doxygen_cmt_span: 1,
         }
@@ -216,6 +249,18 @@ pub enum PointerAlign {
     /// `int * p` — star/amp centred between type and name.
     #[default]
     Middle,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AlignCmtStyle {
+    /// Only align multi-line groups; single trailing comments keep 1 space.
+    /// Matches uncrustify's default behaviour.
+    #[default]
+    Groups,
+    /// Normalize every trailing comment (single or group) to at least
+    /// `align_right_cmt_gap` spaces.
+    All,
 }
 
 // ── Newlines ─────────────────────────────────────────────────────────────────
@@ -282,6 +327,10 @@ cuddle_catch = true
 collapse_empty_body = true
 expand_large_initializers = false
 fn_brace_newline = true
+extern_c_brace = "preserve"
+add_braces_to_if    = true
+add_braces_to_while = false
+add_braces_to_for   = false
 
 [spacing]
 space_before_call_paren    = false
@@ -295,6 +344,7 @@ pointer_align              = "middle"
 space_inside_angle_brackets = false
 align_right_cmt_span       = 3
 align_right_cmt_gap        = 3
+align_right_cmt_style      = "all"
 align_enum_equ_span        = 1
 align_doxygen_cmt_span     = 1
 
@@ -309,6 +359,11 @@ merge_line_comment              = false
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.indent.width, 4);
         assert_eq!(cfg.braces.style, BraceStyle::Kr);
+        assert_eq!(cfg.braces.extern_c_brace, ExternCBrace::Preserve);
+        assert!(cfg.braces.add_braces_to_if);
+        assert!(!cfg.braces.add_braces_to_while);
+        assert!(!cfg.braces.add_braces_to_for);
+        assert_eq!(cfg.spacing.align_right_cmt_style, AlignCmtStyle::All);
         assert!(cfg.spacing.space_before_keyword_paren);
         assert!(!cfg.spacing.space_before_call_paren);
         assert_eq!(cfg.newlines.max_blank_lines, 2);

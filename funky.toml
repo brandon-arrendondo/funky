@@ -12,6 +12,10 @@ cuddle_else         = false
 cuddle_catch        = true
 collapse_empty_body = true
 fn_brace_newline    = true   # true: function-def { on its own line; false: follow style
+extern_c_brace      = "force_same_line"  # "force_same_line" (Google/LLVM) or "preserve" (match uncrustify default)
+add_braces_to_if    = false  # add { } around braceless if bodies (uncrustify mod_full_brace_if = add)
+add_braces_to_while = false  # add { } around braceless while bodies (mod_full_brace_while = add)
+add_braces_to_for   = false  # add { } around braceless for bodies (mod_full_brace_for = add)
 
 [spacing]
 space_before_call_paren    = false  # foo(  vs  foo (
@@ -24,6 +28,7 @@ space_after_cast           = false
 pointer_align              = "name"    # "type" (int* p), "name" (int *p), "middle" (int * p)
 space_inside_angle_brackets = false    # false: vector<int>   true: vector< int >
 align_right_cmt_span       = 3        # 0: off; ≥1: column-align trailing // and /* comments
+align_right_cmt_style      = "groups" # "groups": align multi-line groups only (matches uncrustify default); "all": normalize every trailing comment to min_gap
 align_enum_equ_span        = 1        # 0: off; ≥1: align enum = signs within span
 align_doxygen_cmt_span     = 1        # 0: off; ≥1: column-align /**< member comments
 

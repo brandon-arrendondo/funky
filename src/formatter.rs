@@ -1,6 +1,261 @@
-use crate::config::{BraceStyle, Config, PointerAlign};
+use crate::config::{AlignCmtStyle, BraceStyle, Config, ExternCBrace, PointerAlign};
 use crate::error::FunkyError;
-use crate::token::{Token, TokenKind};
+use crate::token::{Span, Token, TokenKind};
+
+// ── Brace-injection pre-pass ──────────────────────────────────────────────────
+//
+// When add_braces_to_if / _while / _for are enabled, we do a single pre-pass
+// over the token list and inject synthetic `{` / `}` tokens around braceless
+// single-statement bodies.  The resulting token slice is then fed to the main
+// formatter, which sees only already-braced code.
+
+fn inj_synthetic(kind: TokenKind, lexeme: &'static str) -> Token<'static> {
+    Token {
+        kind,
+        lexeme,
+        span: Span {
+            start_byte: 0,
+            end_byte: 0,
+            line: 0,
+            col: 0,
+        },
+    }
+}
+
+fn inj_copy_ws<'src>(tokens: &[Token<'src>], i: &mut usize, out: &mut Vec<Token<'src>>) {
+    while *i < tokens.len() && matches!(tokens[*i].kind, TokenKind::Whitespace | TokenKind::Newline)
+    {
+        out.push(tokens[*i].clone());
+        *i += 1;
+    }
+}
+
+fn inj_peek_non_ws(tokens: &[Token<'_>], from: usize) -> usize {
+    let mut j = from;
+    while j < tokens.len() && matches!(tokens[j].kind, TokenKind::Whitespace | TokenKind::Newline) {
+        j += 1;
+    }
+    j
+}
+
+/// Copy a balanced `(…)` group.  `tokens[*i]` must be `(`.
+fn inj_copy_paren<'src>(tokens: &[Token<'src>], i: &mut usize, out: &mut Vec<Token<'src>>) {
+    out.push(tokens[*i].clone());
+    *i += 1;
+    let mut depth = 1u32;
+    while *i < tokens.len() {
+        let t = tokens[*i].clone();
+        out.push(t.clone());
+        *i += 1;
+        match t.kind {
+            TokenKind::LParen => depth += 1,
+            TokenKind::RParen => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Copy a balanced `{ … }` block, recursively applying brace injection inside.
+fn inj_copy_block<'src>(
+    tokens: &[Token<'src>],
+    i: &mut usize,
+    out: &mut Vec<Token<'src>>,
+    config: &crate::config::Config,
+) {
+    out.push(tokens[*i].clone()); // `{`
+    *i += 1;
+    while *i < tokens.len() {
+        if tokens[*i].kind == TokenKind::RBrace {
+            out.push(tokens[*i].clone());
+            *i += 1;
+            break;
+        }
+        inj_item(tokens, i, out, config);
+    }
+}
+
+/// Copy exactly one statement: a `{ }` block, a control-flow statement, or
+/// tokens through the next `;` at brace-depth 0.
+fn inj_copy_stmt<'src>(
+    tokens: &[Token<'src>],
+    i: &mut usize,
+    out: &mut Vec<Token<'src>>,
+    config: &crate::config::Config,
+) {
+    inj_copy_ws(tokens, i, out);
+    if *i >= tokens.len() {
+        return;
+    }
+    match tokens[*i].kind {
+        TokenKind::LBrace => inj_copy_block(tokens, i, out, config),
+        TokenKind::KwIf | TokenKind::KwFor | TokenKind::KwWhile | TokenKind::KwElse => {
+            inj_item(tokens, i, out, config);
+        }
+        _ => {
+            let mut depth = 0u32;
+            while *i < tokens.len() {
+                let t = tokens[*i].clone();
+                match t.kind {
+                    TokenKind::LBrace => depth += 1,
+                    TokenKind::RBrace => {
+                        if depth == 0 {
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    TokenKind::Semi if depth == 0 => {
+                        out.push(t);
+                        *i += 1;
+                        return;
+                    }
+                    _ => {}
+                }
+                out.push(t);
+                *i += 1;
+            }
+        }
+    }
+}
+
+fn inj_handle_if<'src>(
+    tokens: &[Token<'src>],
+    i: &mut usize,
+    out: &mut Vec<Token<'src>>,
+    config: &crate::config::Config,
+) {
+    out.push(tokens[*i].clone()); // `if`
+    *i += 1;
+    inj_copy_ws(tokens, i, out);
+    if *i < tokens.len() && tokens[*i].kind == TokenKind::LParen {
+        inj_copy_paren(tokens, i, out);
+    }
+    let j = inj_peek_non_ws(tokens, *i);
+    if j < tokens.len() && tokens[j].kind == TokenKind::LBrace {
+        // Already braced — still recurse inside so nested bodies are also handled.
+        inj_copy_ws(tokens, i, out);
+        inj_copy_block(tokens, i, out, config);
+    } else if j >= tokens.len() || tokens[j].kind == TokenKind::Semi {
+        // Degenerate `if (cond);` — copy as-is.
+        inj_copy_ws(tokens, i, out);
+        if *i < tokens.len() {
+            out.push(tokens[*i].clone());
+            *i += 1;
+        }
+    } else {
+        inj_copy_ws(tokens, i, out);
+        out.push(inj_synthetic(TokenKind::LBrace, "{"));
+        inj_copy_stmt(tokens, i, out, config);
+        out.push(inj_synthetic(TokenKind::RBrace, "}"));
+    }
+    // Handle optional else.
+    let j = inj_peek_non_ws(tokens, *i);
+    if j < tokens.len() && tokens[j].kind == TokenKind::KwElse {
+        inj_copy_ws(tokens, i, out);
+        inj_handle_else(tokens, i, out, config);
+    }
+}
+
+fn inj_handle_else<'src>(
+    tokens: &[Token<'src>],
+    i: &mut usize,
+    out: &mut Vec<Token<'src>>,
+    config: &crate::config::Config,
+) {
+    out.push(tokens[*i].clone()); // `else`
+    *i += 1;
+    inj_copy_ws(tokens, i, out);
+    if *i >= tokens.len() {
+        return;
+    }
+    match tokens[*i].kind {
+        TokenKind::KwIf => inj_handle_if(tokens, i, out, config),
+        TokenKind::LBrace => inj_copy_block(tokens, i, out, config),
+        TokenKind::Semi => {
+            out.push(tokens[*i].clone());
+            *i += 1;
+        }
+        _ => {
+            out.push(inj_synthetic(TokenKind::LBrace, "{"));
+            inj_copy_stmt(tokens, i, out, config);
+            out.push(inj_synthetic(TokenKind::RBrace, "}"));
+        }
+    }
+}
+
+/// Handle `for (…) body` or `while (…) body` (not do-while terminator).
+fn inj_handle_ctrl<'src>(
+    tokens: &[Token<'src>],
+    i: &mut usize,
+    out: &mut Vec<Token<'src>>,
+    config: &crate::config::Config,
+) {
+    out.push(tokens[*i].clone()); // keyword
+    *i += 1;
+    inj_copy_ws(tokens, i, out);
+    if *i < tokens.len() && tokens[*i].kind == TokenKind::LParen {
+        inj_copy_paren(tokens, i, out);
+    }
+    let j = inj_peek_non_ws(tokens, *i);
+    if j >= tokens.len() || tokens[j].kind == TokenKind::LBrace || tokens[j].kind == TokenKind::Semi
+    {
+        // Already braced, or `;` (do-while terminator / empty loop) — copy as-is.
+        inj_copy_ws(tokens, i, out);
+        if *i < tokens.len() {
+            inj_item(tokens, i, out, config);
+        }
+    } else {
+        inj_copy_ws(tokens, i, out);
+        out.push(inj_synthetic(TokenKind::LBrace, "{"));
+        inj_copy_stmt(tokens, i, out, config);
+        out.push(inj_synthetic(TokenKind::RBrace, "}"));
+    }
+}
+
+/// Dispatch one logical item from the token stream.
+fn inj_item<'src>(
+    tokens: &[Token<'src>],
+    i: &mut usize,
+    out: &mut Vec<Token<'src>>,
+    config: &crate::config::Config,
+) {
+    if *i >= tokens.len() {
+        return;
+    }
+    match tokens[*i].kind {
+        TokenKind::KwIf if config.braces.add_braces_to_if => inj_handle_if(tokens, i, out, config),
+        TokenKind::KwFor if config.braces.add_braces_to_for => {
+            inj_handle_ctrl(tokens, i, out, config)
+        }
+        TokenKind::KwWhile if config.braces.add_braces_to_while => {
+            inj_handle_ctrl(tokens, i, out, config)
+        }
+        TokenKind::KwElse if config.braces.add_braces_to_if => {
+            inj_handle_else(tokens, i, out, config)
+        }
+        TokenKind::LBrace => inj_copy_block(tokens, i, out, config),
+        _ => {
+            out.push(tokens[*i].clone());
+            *i += 1;
+        }
+    }
+}
+
+fn inject_braces_pass<'src>(
+    tokens: &[Token<'src>],
+    config: &crate::config::Config,
+) -> Vec<Token<'src>> {
+    let mut out = Vec::with_capacity(tokens.len() + 32);
+    let mut i = 0;
+    while i < tokens.len() {
+        inj_item(tokens, &mut i, &mut out, config);
+    }
+    out
+}
 
 // ── Context ───────────────────────────────────────────────────────────────────
 
@@ -48,6 +303,11 @@ struct Fmt<'src> {
     case_body_stack: Vec<bool>,
     /// Current preprocessor #if nesting depth (used for pp_indent).
     pp_depth: u32,
+    /// Stack of saved `indent_level` values at each `#if`/`#ifdef`/`#ifndef` entry.
+    /// On `#else`/`#elif` we restore to the saved level so both branches start from
+    /// the same code-brace depth; on `#endif` we pop without restoring (the last
+    /// branch's accumulated depth is correct).
+    pp_brace_stack: Vec<u32>,
     /// Number of open ternary `?` operators; used to detect ternary `:`.
     ternary_depth: u32,
     /// Set when `operator` keyword is emitted; cleared on the next non-ws token
@@ -139,6 +399,7 @@ impl<'src> Fmt<'src> {
             switch_depth: 0,
             case_body_stack: Vec::new(),
             pp_depth: 0,
+            pp_brace_stack: Vec::new(),
             ternary_depth: 0,
             after_operator_kw: false,
             last_was_operator_overload: false,
@@ -215,6 +476,10 @@ impl<'src> Fmt<'src> {
     }
 
     fn nl(&mut self) {
+        // Strip trailing spaces from the current line before emitting the newline.
+        while self.output.ends_with(' ') {
+            self.output.pop();
+        }
         self.output.push_str(self.config.newline_str());
         self.at_line_start = true;
         self.suppress_next_space = false;
@@ -497,6 +762,37 @@ impl<'src> Fmt<'src> {
     }
 
     // ── Cast detection ────────────────────────────────────────────────────────
+
+    /// True when the token immediately before the current `(` is a sizeof-like
+    /// operator keyword — meaning the `(` is NOT a cast paren.
+    fn prev_is_sizeof_like(&self) -> bool {
+        // self.pos is one past `(`; self.pos-1 is `(` itself; scan from self.pos-2.
+        if self.pos < 2 {
+            return false;
+        }
+        let mut i = self.pos - 2;
+        loop {
+            match self.tokens[i].kind {
+                TokenKind::Whitespace | TokenKind::Newline => {
+                    if i == 0 {
+                        return false;
+                    }
+                    i -= 1;
+                }
+                _ => {
+                    let tok = &self.tokens[i];
+                    // Any identifier before `(` is a function call, never a cast.
+                    if tok.kind == TokenKind::Ident {
+                        return true;
+                    }
+                    return matches!(
+                        tok.lexeme,
+                        "sizeof" | "alignof" | "alignas" | "__alignof__" | "decltype" | "typeid"
+                    );
+                }
+            }
+        }
+    }
 
     /// True if the tokens from `self.pos` up to and including a matching `)`
     /// look like a C-style cast type: optional cv/elaborated-type keywords,
@@ -1053,9 +1349,18 @@ impl<'src> Fmt<'src> {
         let mut last_was_operator_kw = false;
         while i < self.tokens.len() {
             match self.tokens[i].kind {
-                TokenKind::Ident | TokenKind::Keyword => {
-                    last_was_operator_kw = self.tokens[i].kind == TokenKind::Keyword
-                        && self.tokens[i].lexeme == "operator";
+                TokenKind::Ident => {
+                    last_was_operator_kw = false;
+                    found_name = true;
+                    i += 1;
+                }
+                TokenKind::Keyword => {
+                    // Only `operator` can appear as (part of) a declarator name;
+                    // all other keywords (sizeof, return, …) indicate an expression.
+                    if self.tokens[i].lexeme != "operator" {
+                        break;
+                    }
+                    last_was_operator_kw = true;
                     found_name = true;
                     i += 1;
                 }
@@ -1422,23 +1727,38 @@ impl<'src> Fmt<'src> {
                     let nl = self.config.newline_str();
                     let normalized = normalized.replace('\n', nl);
 
-                    if self.config.preprocessor.pp_indent {
-                        // Classify directive to decide depth adjustment.
-                        let trimmed = normalized.trim_start();
-                        let directive = trimmed
-                            .strip_prefix('#')
-                            .map(|s| s.trim_start().split_whitespace().next().unwrap_or(""))
-                            .unwrap_or("");
-                        let is_open = matches!(directive, "if" | "ifdef" | "ifndef");
-                        let is_close = directive == "endif";
-                        let is_reopen = matches!(directive, "elif" | "else");
+                    // Classify the directive (always, not just when pp_indent is on).
+                    let trimmed = normalized.trim_start();
+                    let directive = trimmed
+                        .strip_prefix('#')
+                        .map(|s| s.split_whitespace().next().unwrap_or(""))
+                        .unwrap_or("");
+                    let is_open = matches!(directive, "if" | "ifdef" | "ifndef");
+                    let is_close = directive == "endif";
+                    let is_reopen = matches!(directive, "elif" | "else");
 
+                    // Track code brace depth across #ifdef/#else/#endif so both
+                    // branches start indenting from the same level.
+                    if is_open {
+                        self.pp_brace_stack.push(self.indent_level);
+                    } else if is_reopen {
+                        // Restore to the depth recorded at the opening #if so the
+                        // else-branch starts with the same baseline.
+                        if let Some(&saved) = self.pp_brace_stack.last() {
+                            self.indent_level = saved;
+                        }
+                    } else if is_close {
+                        // Pop without restoring — the last branch's accumulated
+                        // depth is the correct post-#endif depth.
+                        self.pp_brace_stack.pop();
+                    }
+
+                    if self.config.preprocessor.pp_indent {
                         // #endif and #elif/#else dedent before emit.
                         if is_close || is_reopen {
                             self.pp_depth = self.pp_depth.saturating_sub(1);
                         }
-                        let indent_str =
-                            self.config.indent_str().repeat(self.pp_depth as usize);
+                        let indent_str = self.config.indent_str().repeat(self.pp_depth as usize);
                         // Write depth-prefix before the `#`.
                         self.write(&indent_str);
                         self.write(trimmed);
@@ -1542,21 +1862,21 @@ impl<'src> Fmt<'src> {
                                     self.write(" ");
                                     let mut prev_kind = TokenKind::LBrace;
                                     let mut suppress = false;
-                                    for (_idx, (lex, kind)) in content.iter().enumerate() {
-                                        let need_space = !suppress
-                                            && !matches!(kind, TokenKind::Comma)
-                                            && !matches!(
+                                    for (lex, kind) in content.iter() {
+                                        // No space before . or -> only when it's member
+                                        // access (prev ends an expression). Designated
+                                        // initializer .field comes after , or { and
+                                        // does need a space.
+                                        let need_space = !(suppress
+                                            || matches!(kind, TokenKind::Comma)
+                                            || matches!(
                                                 prev_kind,
                                                 TokenKind::LBrace
                                                     | TokenKind::Dot
                                                     | TokenKind::Arrow
                                                     | TokenKind::LParen
                                             )
-                                            // No space before . or -> only when it's member
-                                            // access (prev ends an expression). Designated
-                                            // initializer .field comes after , or { and
-                                            // does need a space.
-                                            && !(matches!(kind, TokenKind::Dot | TokenKind::Arrow)
+                                            || matches!(kind, TokenKind::Dot | TokenKind::Arrow)
                                                 && prev_kind.ends_expr());
                                         if need_space {
                                             self.write(" ");
@@ -1573,7 +1893,9 @@ impl<'src> Fmt<'src> {
                                                 | TokenKind::Amp
                                         ) && matches!(
                                             prev_kind,
-                                            TokenKind::Comma | TokenKind::LBrace | TokenKind::LParen
+                                            TokenKind::Comma
+                                                | TokenKind::LBrace
+                                                | TokenKind::LParen
                                         ) {
                                             suppress = true;
                                         }
@@ -1586,14 +1908,26 @@ impl<'src> Fmt<'src> {
                                 continue;
                             }
                         }
-                        // extern "C" { } is a linkage specification, not a function
-                        // body. The { always stays on the same line regardless of
-                        // brace style or fn_brace_newline.
+                        // extern "C" { } is a linkage specification. Placement is
+                        // controlled by braces.extern_c_brace:
+                        //   force_same_line — always K&R (Google/LLVM style)
+                        //   preserve        — leave brace where source has it
                         BraceCtx::ExternC => {
-                            if self.at_line_start {
-                                self.trim_to_prev_line_end();
+                            match self.config.braces.extern_c_brace {
+                                ExternCBrace::ForceSameLine => {
+                                    if self.at_line_start {
+                                        self.trim_to_prev_line_end();
+                                    }
+                                    self.space();
+                                }
+                                ExternCBrace::Preserve => {
+                                    if self.at_line_start {
+                                        // brace was already on its own line in source — keep it
+                                    } else {
+                                        self.space();
+                                    }
+                                }
                             }
-                            self.space();
                             self.write("{");
                         }
                         _ => match self.config.braces.style {
@@ -1706,9 +2040,7 @@ impl<'src> Fmt<'src> {
                     let closing_ctx = self.brace_stack.last().copied().unwrap_or(BraceCtx::Other);
                     // When indent_switch_case is on, an active case body adds an
                     // extra indent level that must be unwound before the `}`.
-                    if closing_ctx == BraceCtx::Switch
-                        && self.config.indent.indent_switch_case
-                    {
+                    if closing_ctx == BraceCtx::Switch && self.config.indent.indent_switch_case {
                         if let Some(true) = self.case_body_stack.last() {
                             self.indent_level = self.indent_level.saturating_sub(1);
                         }
@@ -1793,7 +2125,7 @@ impl<'src> Fmt<'src> {
                 // ── Paren depth tracking ──────────────────────────────────────
                 TokenKind::LParen => {
                     self.flush_blank_lines();
-                    let is_cast = self.next_is_type_kw();
+                    let is_cast = self.next_is_type_kw() && !self.prev_is_sizeof_like();
                     self.cast_paren_stack.push(is_cast);
                     if self.at_line_start {
                         self.indent();
@@ -1830,6 +2162,10 @@ impl<'src> Fmt<'src> {
                     self.paren_col_stack.pop();
                     self.paren_eol_stack.pop();
                     let is_cast_close = self.cast_paren_stack.pop().unwrap_or(false);
+                    // A pointer declarator `*`/`&` immediately before `)` (e.g.
+                    // `sizeof(char *)`) sets suppress_next_space, but that flag
+                    // must not leak out of the closing paren into subsequent tokens.
+                    self.suppress_next_space = false;
                     self.prev = Some(TokenKind::RParen);
                     self.last_was_template_close = false;
                     self.last_was_cast_close = is_cast_close;
@@ -1903,8 +2239,7 @@ impl<'src> Fmt<'src> {
                             // at the switch-body level (no additional dedent).
                             if let Some(active) = self.case_body_stack.last_mut() {
                                 if *active {
-                                    self.indent_level =
-                                        self.indent_level.saturating_sub(1);
+                                    self.indent_level = self.indent_level.saturating_sub(1);
                                     *active = false;
                                 }
                             }
@@ -2111,7 +2446,8 @@ impl<'src> Fmt<'src> {
                         self.space();
                     }
                     self.write(tok.lexeme);
-                    if self.paren_depth == 0 && self.bracket_depth == 0 && self.assign_col.is_none() {
+                    if self.paren_depth == 0 && self.bracket_depth == 0 && self.assign_col.is_none()
+                    {
                         let space = usize::from(self.config.spacing.space_around_binary_ops);
                         self.assign_col = Some(self.current_col + space);
                         self.assign_eol = false;
@@ -2165,10 +2501,26 @@ impl<'src> Fmt<'src> {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 pub fn format<'src>(tokens: &[Token<'src>], config: &Config) -> Result<String, FunkyError> {
+    let injected;
+    let tokens: &[Token<'src>] = if config.braces.add_braces_to_if
+        || config.braces.add_braces_to_while
+        || config.braces.add_braces_to_for
+    {
+        injected = inject_braces_pass(tokens, config);
+        &injected
+    } else {
+        tokens
+    };
     let output = Fmt::new(config, tokens).format()?;
     let nl = config.newline_str();
     let output = if config.spacing.align_right_cmt_span > 0 {
-        align_trailing_comments(&output, nl, config.spacing.align_right_cmt_gap.max(1))
+        let normalize_single = config.spacing.align_right_cmt_style == AlignCmtStyle::All;
+        align_trailing_comments(
+            &output,
+            nl,
+            config.spacing.align_right_cmt_gap.max(1),
+            normalize_single,
+        )
     } else {
         output
     };
@@ -2242,7 +2594,12 @@ fn trailing_comment_col(line: &str) -> Option<usize> {
 /// Align trailing `//` comments within groups of consecutive lines that all
 /// carry a trailing comment.  Each group is aligned to the widest code column.
 /// `min_gap` is the minimum number of spaces between code end and comment.
-fn align_trailing_comments(output: &str, nl: &str, min_gap: usize) -> String {
+fn align_trailing_comments(
+    output: &str,
+    nl: &str,
+    min_gap: usize,
+    normalize_single: bool,
+) -> String {
     let lines: Vec<&str> = output.split(nl).collect();
     let n = lines.len();
     let cols: Vec<Option<usize>> = lines.iter().map(|l| trailing_comment_col(l)).collect();
@@ -2255,22 +2612,23 @@ fn align_trailing_comments(output: &str, nl: &str, min_gap: usize) -> String {
             while j < n && cols[j].is_some() {
                 j += 1;
             }
-            // Group is lines[i..j]; align if 2+ lines.
-            if j > i + 1 {
-                // Find widest code (trimmed) length across the group; comments
-                // align at max_code_len + min_gap.
-                let max_code_len = (i..j)
-                    .map(|k| lines[k][..cols[k].unwrap()].trim_end().len())
-                    .max()
-                    .unwrap();
-                let target = max_code_len + min_gap;
-                for k in i..j {
-                    let col = cols[k].unwrap();
-                    let code = lines[k][..col].trim_end();
-                    let comment = &lines[k][col..];
-                    let pad = target - code.len();
-                    result[k] = format!("{}{}{}", code, " ".repeat(pad), comment);
-                }
+            let is_single = j == i + 1;
+            // Skip single-line groups unless normalize_single is set.
+            if is_single && !normalize_single {
+                i = j;
+                continue;
+            }
+            let max_code_len = (i..j)
+                .map(|k| lines[k][..cols[k].unwrap()].trim_end().len())
+                .max()
+                .unwrap();
+            let target = max_code_len + min_gap;
+            for k in i..j {
+                let col = cols[k].unwrap();
+                let code = lines[k][..col].trim_end();
+                let comment = &lines[k][col..];
+                let pad = target - code.len();
+                result[k] = format!("{}{}{}", code, " ".repeat(pad), comment);
             }
             i = j;
         } else {
@@ -2514,6 +2872,7 @@ mod tests {
                 collapse_empty_body: false,
                 expand_large_initializers: true,
                 fn_brace_newline: false,
+                ..BraceConfig::default()
             },
             ..Config::default()
         };
@@ -2557,6 +2916,7 @@ mod tests {
                 collapse_empty_body: false,
                 expand_large_initializers: true,
                 fn_brace_newline: true,
+                ..BraceConfig::default()
             },
             ..Config::default()
         };
@@ -2630,6 +2990,7 @@ mod tests {
                 collapse_empty_body: true,
                 expand_large_initializers: false,
                 fn_brace_newline: true,
+                ..BraceConfig::default()
             },
             ..Config::default()
         };
@@ -3209,7 +3570,8 @@ mod tests {
         // A section comment between two declarations must not end the var-decl
         // block. The blank line should appear after the last declaration, not
         // before the intermediate comment.
-        let src = "void f(void) {\n    int x = 0;\n    /* WHEN */\n    int y = 1;\n    use(x, y);\n}\n";
+        let src =
+            "void f(void) {\n    int x = 0;\n    /* WHEN */\n    int y = 1;\n    use(x, y);\n}\n";
         let out = fmt(src);
         assert!(
             out.contains("int y = 1;\n\n"),
@@ -3226,7 +3588,8 @@ mod tests {
     fn var_decl_block_macro_calls_not_treated_as_decls() {
         // Adjacent macro calls on separate lines (MACRO_A\nMACRO_B(...)) must
         // not be mistaken for `TypeName varName` declarations.
-        let src = "void f(void) {\n    int x = 0;\n    EXPECT_BEGIN\n    ASSERT(x);\n    VERIFY_END\n}\n";
+        let src =
+            "void f(void) {\n    int x = 0;\n    EXPECT_BEGIN\n    ASSERT(x);\n    VERIFY_END\n}\n";
         let out = fmt(src);
         // No spurious blank line between ASSERT(...); and VERIFY_END.
         assert!(
@@ -3239,7 +3602,8 @@ mod tests {
     fn var_decl_block_attribute_macro_plus_const_type_is_decl() {
         // `ATTR_MACRO const Type* var = ...` must be recognized as a declaration
         // so it stays in the var-decl block.
-        let src = "void f(void) {\n    int n = 4;\n    ATTR const float* p = buf;\n    use(p);\n}\n";
+        let src =
+            "void f(void) {\n    int n = 4;\n    ATTR const float* p = buf;\n    use(p);\n}\n";
         let out = fmt(src);
         assert!(
             out.contains("buf;\n\n"),
@@ -3393,7 +3757,6 @@ mod tests {
         assert!(out.contains("{ 1, -2, -95 }"), "negative literals: {out}");
     }
 
-
     #[test]
     fn cast_user_defined_pointer_no_space() {
         // (MyType *) val — pointer cast with user-defined type.
@@ -3432,7 +3795,11 @@ mod tests {
     fn indent_style_tabs() {
         use crate::config::{IndentConfig, IndentStyle};
         let cfg = Config {
-            indent: IndentConfig { style: IndentStyle::Tabs, width: 4, indent_switch_case: true },
+            indent: IndentConfig {
+                style: IndentStyle::Tabs,
+                width: 4,
+                indent_switch_case: true,
+            },
             ..Config::default()
         };
         let src = "void f(int x) { if (x > 0) { foo(x); } }\n";
@@ -3447,7 +3814,11 @@ mod tests {
     fn indent_style_tabs_idempotent() {
         use crate::config::{IndentConfig, IndentStyle};
         let cfg = Config {
-            indent: IndentConfig { style: IndentStyle::Tabs, width: 4, indent_switch_case: true },
+            indent: IndentConfig {
+                style: IndentStyle::Tabs,
+                width: 4,
+                indent_switch_case: true,
+            },
             ..Config::default()
         };
         let src = "void f() {\n\tif (x) {\n\t\tfoo();\n\t}\n}\n";
@@ -3489,6 +3860,17 @@ mod tests {
     }
 
     #[test]
+    fn sizeof_minus_not_unary() {
+        // sizeof(x) ends an expression; `-` after it must be treated as binary.
+        let src = "void f(void) {\n    strncpy(buf, src, sizeof(buf) - 1);\n}\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("sizeof(buf) - 1"),
+            "minus after sizeof() must be binary (space on both sides): {out}"
+        );
+    }
+
+    #[test]
     fn struct_closing_brace_semicolon_same_line() {
         // `struct Foo { … };` must not put `;` on its own line.
         let src = "struct Point { int x; int y; };\n";
@@ -3518,7 +3900,8 @@ mod tests {
         let src = "extern \"C\" {\nint f();\n} /* extern \"C\" */\n";
         let out = fmt(src);
         assert!(
-            out.contains("} /* extern \"C\" */"),
+            out.lines()
+                .any(|l| l.starts_with('}') && l.contains("/* extern \"C\" */")),
             "trailing block comment should stay on same line as closing brace, got:\n{out}"
         );
     }
@@ -3538,33 +3921,39 @@ mod tests {
     }
 
     #[test]
-    fn extern_c_brace_always_same_line() {
-        // extern "C" is a linkage specification, not a function body.
-        // The { must stay on the same line regardless of fn_brace_newline or brace style.
-        let src = "extern \"C\" {\nint foo(void);\n}\n";
+    fn extern_c_brace_force_same_line() {
+        // Default (force_same_line): { always on same line regardless of source.
+        let src_allman = "extern \"C\"\n{\nint foo(void);\n}\n";
+        let src_kr = "extern \"C\" {\nint foo(void);\n}\n";
 
-        let out = fmt(src);
-        assert!(
-            out.contains("extern \"C\" {"),
-            "extern \"C\" {{ must stay on same line with default config, got:\n{out}"
-        );
+        for src in [src_allman, src_kr] {
+            let out = fmt(src);
+            assert!(
+                out.contains("extern \"C\" {"),
+                "extern \"C\" {{ must be forced to same line (default config), got:\n{out}"
+            );
+        }
+    }
 
-        // fn_brace_newline=false: still same line
+    #[test]
+    fn extern_c_brace_preserve() {
         let mut cfg = Config::default();
-        cfg.braces.fn_brace_newline = false;
-        let out2 = fmt_with(src, &cfg);
+        cfg.braces.extern_c_brace = ExternCBrace::Preserve;
+
+        // Source has brace on next line — preserve keeps it there.
+        let src_allman = "extern \"C\"\n{\nint foo(void);\n}\n";
+        let out_allman = fmt_with(src_allman, &cfg);
         assert!(
-            out2.contains("extern \"C\" {"),
-            "extern \"C\" {{ must stay on same line when fn_brace_newline=false, got:\n{out2}"
+            out_allman.lines().any(|l| l.trim() == "{"),
+            "extern_c_brace=preserve must keep brace on its own line, got:\n{out_allman}"
         );
 
-        // Allman brace style: extern "C" still same line
-        let mut cfg3 = Config::default();
-        cfg3.braces.style = BraceStyle::Allman;
-        let out3 = fmt_with(src, &cfg3);
+        // Source has brace on same line — preserve keeps it there too.
+        let src_kr = "extern \"C\" {\nint foo(void);\n}\n";
+        let out_kr = fmt_with(src_kr, &cfg);
         assert!(
-            out3.contains("extern \"C\" {"),
-            "extern \"C\" {{ must stay on same line even in Allman mode, got:\n{out3}"
+            out_kr.contains("extern \"C\" {"),
+            "extern_c_brace=preserve must keep brace on same line when source has it there, got:\n{out_kr}"
         );
     }
 
@@ -3874,6 +4263,50 @@ mod tests {
     }
 
     #[test]
+    fn align_trailing_comments_single_line_groups_default() {
+        // Default style (Groups): a lone trailing comment keeps 1 space — not normalized.
+        let src = "uint8_t buf[] = {\n    0x00, /* bad id */\n    0x01, 0x02\n};\n";
+        let out = fmt_with(src, &cfg_align(1));
+        let line = out.lines().find(|l| l.contains("/* bad id */")).unwrap();
+        // With Groups default the comment should be flush after the comma with 1 space.
+        assert!(
+            line.contains(", /* bad id */"),
+            "single trailing comment should keep 1 space in Groups mode:\n{out}"
+        );
+    }
+
+    #[test]
+    fn align_trailing_comments_single_line_all_style() {
+        // AlignCmtStyle::All: single trailing comments are padded to min_gap.
+        use crate::config::{AlignCmtStyle, SpacingConfig};
+        let cfg = Config {
+            spacing: SpacingConfig {
+                align_right_cmt_span: 1,
+                align_right_cmt_gap: 3,
+                align_right_cmt_style: AlignCmtStyle::All,
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let src = "uint8_t buf[] = {\n    0x00, /* bad id */\n    0x01, 0x02\n};\n";
+        let out = fmt_with(src, &cfg);
+        let col = out
+            .lines()
+            .find(|l| l.contains("/* bad id */"))
+            .and_then(trailing_comment_col)
+            .expect("comment not found");
+        let code_len = out
+            .lines()
+            .find(|l| l.contains("/* bad id */"))
+            .map(|l| l[..col].trim_end().len())
+            .unwrap();
+        assert!(
+            col >= code_len + 3,
+            "single trailing comment must be padded to min_gap=3 in All mode, got col={col}:\n{out}"
+        );
+    }
+
+    #[test]
     fn align_trailing_comments_blank_line_breaks_group() {
         let src = "int a; // g1\nint b; // g1\n\nint c; // g2\n";
         let out = fmt_with(src, &cfg_align(1));
@@ -3947,7 +4380,8 @@ mod tests {
     #[test]
     fn align_enum_equals_isolated_values_aligned() {
         // Each value on its own paragraph (blank line between every pair) — all should align.
-        let src = "typedef enum {\nSUCCESS = 0,\n\nVERY_LONG_FAILURE_CODE = 1,\n\nTIMEOUT = 2,\n} R;\n";
+        let src =
+            "typedef enum {\nSUCCESS = 0,\n\nVERY_LONG_FAILURE_CODE = 1,\n\nTIMEOUT = 2,\n} R;\n";
         let out = fmt_with(src, &cfg_enum_align(1));
         let positions: Vec<usize> = out.lines().filter_map(enum_eq_col).collect();
         assert_eq!(positions.len(), 3, "expected 3 value lines:\n{out}");
@@ -4333,7 +4767,8 @@ mod tests {
 
     #[test]
     fn operator_new_delete_space() {
-        let src = "class Foo {\n    void *operator new(size_t);\n    void operator delete(void *);\n};\n";
+        let src =
+            "class Foo {\n    void *operator new(size_t);\n    void operator delete(void *);\n};\n";
         let out = fmt(src);
         assert!(
             out.lines().any(|l| l.contains("operator new(")),
@@ -4380,6 +4815,98 @@ mod tests {
     }
 
     #[test]
+    fn binary_plus_after_function_call_not_unary() {
+        // `+` after a closing `)` of a regular function call must be binary.
+        // Regression: strlen(prefix)+1 was emitting "+strlen(prefix) +1".
+        let src = "void f(void) {\n    int n = strlen(topic) + strlen(prefix) + 1;\n}\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("strlen(prefix) + 1"),
+            "binary + after func-call ) must have space on both sides: {out}"
+        );
+        assert!(
+            out.contains("strlen(topic) + strlen(prefix)"),
+            "binary + between two func-calls must have space on both sides: {out}"
+        );
+    }
+
+    #[test]
+    fn space_after_comma_not_eaten_by_sizeof_pointer() {
+        // `*` inside sizeof(type *) set suppress_next_space which leaked through
+        // `)` and ate the space after the following comma.
+        let src = "void f(void) {\n    qsort(files, count, sizeof(char *), cmp);\n}\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("sizeof(char *), cmp"),
+            "space after comma must not be eaten by * inside sizeof(): {out}"
+        );
+    }
+
+    #[test]
+    fn space_after_comma_not_eaten_by_cast_pointer() {
+        // Same leak pattern with an explicit cast `(unsigned char *)buf`.
+        let src = "void f(void) {\n    fn(ctx, (unsigned char *)buf, (unsigned int)len);\n}\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("(unsigned char *)buf, (unsigned int)len"),
+            "space after comma following a cast must not be suppressed: {out}"
+        );
+    }
+
+    #[test]
+    fn multiplication_by_sizeof_not_pointer_decl() {
+        // `count * sizeof(char *)` — the `*` is binary multiplication, not a
+        // pointer declarator.  Regression: was emitting `count *sizeof(char *)`.
+        let src = "void f(void) {\n    p = realloc(p, count * sizeof(char *));\n}\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("count * sizeof(char *)"),
+            "* before sizeof must be binary multiplication: {out}"
+        );
+    }
+
+    #[test]
+    fn no_trailing_space_after_closing_brace() {
+        // `} while(...)` on separate lines: the space emitted for the cuddle check
+        // must be stripped before the newline — no trailing whitespace.
+        let src = "void f(void) {\n    if (x) {\n        y = 1;\n    }\n    while (x) {\n        x--;\n    }\n}\n";
+        let out = fmt(src);
+        for line in out.lines() {
+            assert!(
+                !line.ends_with(' '),
+                "no line should have trailing spaces; got: {:?}\nfull output:\n{out}",
+                line
+            );
+        }
+    }
+
+    #[test]
+    fn ifdef_else_brace_depth_reset() {
+        // When #ifdef and #else branches each open one `{`, the code after
+        // #endif should be indented at depth 2 (one for the outer block, one for
+        // the inner block opened in each branch), not depth 3 (incorrectly
+        // accumulated from both branches).
+        let src = concat!(
+            "void f(void) {\n",
+            "    if (a) {\n",
+            "#ifdef WIN32\n",
+            "        if (b) {\n",
+            "#else\n",
+            "        if (c) {\n",
+            "#endif\n",
+            "            x = 1;\n",
+            "        }\n",
+            "    }\n",
+            "}\n"
+        );
+        let out = fmt(src);
+        assert!(
+            out.contains("            x = 1;"),
+            "#ifdef/#else depth: code after #endif must be at depth 3 (12 spaces): {out}"
+        );
+    }
+
+    #[test]
     fn case_label_no_space_before_colon() {
         let src = "void f(int x) { switch (x) { case 1: break; default: break; } }\n";
         let out = fmt(src);
@@ -4390,6 +4917,162 @@ mod tests {
         assert!(
             out.lines().any(|l| l.trim() == "default:"),
             "default label must not have space before colon:\n{out}"
+        );
+    }
+
+    // ── add_braces_to_if / _while / _for ─────────────────────────────────────
+
+    fn cfg_add_braces_if() -> Config {
+        use crate::config::BraceConfig;
+        Config {
+            braces: BraceConfig {
+                add_braces_to_if: true,
+                ..BraceConfig::default()
+            },
+            ..Config::default()
+        }
+    }
+
+    fn cfg_add_braces_all() -> Config {
+        use crate::config::BraceConfig;
+        Config {
+            braces: BraceConfig {
+                add_braces_to_if: true,
+                add_braces_to_while: true,
+                add_braces_to_for: true,
+                ..BraceConfig::default()
+            },
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn add_braces_if_simple() {
+        let src = "void f() { if (x) return; }\n";
+        let out = fmt_with(src, &cfg_add_braces_if());
+        assert!(out.contains("if (x) {"), "missing opening brace:\n{out}");
+        assert!(out.contains("return;"), "body lost:\n{out}");
+        // The closing `}` of the if-block must appear before the function `}`.
+        let if_close = out.find("if").unwrap();
+        let braces: Vec<_> = out[if_close..].match_indices('}').collect();
+        assert!(
+            braces.len() >= 2,
+            "need at least if-close and fn-close:\n{out}"
+        );
+    }
+
+    #[test]
+    fn add_braces_if_already_braced() {
+        let src = "void f() { if (x) { return; } }\n";
+        let out = fmt_with(src, &cfg_add_braces_if());
+        // Should not add extra brace levels.
+        let brace_count = out.chars().filter(|&c| c == '{').count();
+        // Exactly 2: function body + if body.
+        assert_eq!(brace_count, 2, "unexpected brace count:\n{out}");
+    }
+
+    #[test]
+    fn add_braces_if_else() {
+        let src = "void f() { if (x) a(); else b(); }\n";
+        let out = fmt_with(src, &cfg_add_braces_if());
+        assert!(out.contains("if (x) {"), "if branch missing brace:\n{out}");
+        assert!(
+            out.contains("} else {"),
+            "else branch missing brace:\n{out}"
+        );
+    }
+
+    #[test]
+    fn add_braces_else_if_chain() {
+        let src = "void f() { if (a) x(); else if (b) y(); else z(); }\n";
+        let out = fmt_with(src, &cfg_add_braces_if());
+        // All three branches must be braced.
+        assert!(out.contains("if (a) {"), "if-branch:\n{out}");
+        assert!(out.contains("} else if (b) {"), "else-if branch:\n{out}");
+        assert!(out.contains("} else {"), "else branch:\n{out}");
+    }
+
+    #[test]
+    fn add_braces_for_simple() {
+        let src = "void f() { for (int i=0;i<10;i++) do_thing(i); }\n";
+        let out = fmt_with(
+            src,
+            &Config {
+                braces: crate::config::BraceConfig {
+                    add_braces_to_for: true,
+                    ..crate::config::BraceConfig::default()
+                },
+                ..Config::default()
+            },
+        );
+        assert!(
+            out.contains("i++) {") || out.contains("i < 10; i++) {"),
+            "for brace:\n{out}"
+        );
+        assert!(out.contains("do_thing(i);"), "body lost:\n{out}");
+    }
+
+    #[test]
+    fn add_braces_while_simple() {
+        let src = "void f() { while (cond) work(); }\n";
+        let out = fmt_with(
+            src,
+            &Config {
+                braces: crate::config::BraceConfig {
+                    add_braces_to_while: true,
+                    ..crate::config::BraceConfig::default()
+                },
+                ..Config::default()
+            },
+        );
+        assert!(out.contains("while (cond) {"), "while brace:\n{out}");
+        assert!(out.contains("work();"), "body lost:\n{out}");
+    }
+
+    #[test]
+    fn add_braces_do_while_not_wrapped() {
+        // The `while` in a do-while is a terminator — must NOT get a body wrapped.
+        let src = "void f() { do work(); while (cond); }\n";
+        let out = fmt_with(
+            src,
+            &Config {
+                braces: crate::config::BraceConfig {
+                    add_braces_to_while: true,
+                    ..crate::config::BraceConfig::default()
+                },
+                ..Config::default()
+            },
+        );
+        // The while(...); must remain as a terminator, not while(...) { ... }
+        assert!(
+            out.contains("while (cond);"),
+            "do-while terminator must not be wrapped:\n{out}"
+        );
+    }
+
+    #[test]
+    fn add_braces_nested_if_in_if() {
+        // Dangling else: else belongs to inner if.
+        let src = "void f() { if (a) if (b) x(); else y(); }\n";
+        let out = fmt_with(src, &cfg_add_braces_if());
+        // Inner if-else must both be braced.
+        assert!(out.contains("if (b) {"), "inner if:\n{out}");
+        assert!(out.contains("} else {"), "inner else:\n{out}");
+        // Outer if wraps the entire inner if-else.
+        let open_count = out.chars().filter(|&c| c == '{').count();
+        // fn body + outer-if body + inner-if body + inner-else body = 4
+        assert_eq!(open_count, 4, "expected 4 braces:\n{out}");
+    }
+
+    #[test]
+    fn add_braces_nested_for_in_if() {
+        let src = "void f() { if (ok) for (int i=0;i<n;i++) use(i); }\n";
+        let out = fmt_with(src, &cfg_add_braces_all());
+        assert!(out.contains("if (ok) {"), "if brace:\n{out}");
+        // for inside if body must also be braced
+        assert!(
+            out.contains("i++) {") || out.contains("i < n; i++) {"),
+            "for brace:\n{out}"
         );
     }
 }

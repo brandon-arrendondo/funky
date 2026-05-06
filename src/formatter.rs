@@ -609,8 +609,12 @@ impl<'src> Fmt<'src> {
     fn flush_blank_lines(&mut self) {
         if self.force_blank_after_decls {
             self.force_blank_after_decls = false;
-            if self.blank_lines == 0 {
-                self.blank_lines = 1;
+            // When not at line start (e.g. a trailing /* comment */ follows the
+            // last decl), one nl() only terminates the current line; we need a
+            // second nl() to produce an actual blank line.
+            let min_lines = if self.at_line_start { 1 } else { 2 };
+            if self.blank_lines < min_lines {
+                self.blank_lines = min_lines;
             }
         }
         let max = self.config.newlines.max_blank_lines as u32;
@@ -2149,9 +2153,12 @@ impl<'src> Fmt<'src> {
                     if ctx == BraceCtx::Type {
                         self.class_depth += 1;
                     }
-                    if ctx == BraceCtx::Function
-                        && self.config.newlines.blank_line_after_var_decl_block
-                    {
+                    // A Block at global scope (brace_stack currently empty) is a
+                    // macro-defined function body (e.g. SM_STATE(...) { ... }).
+                    // Treat it like a Function for the var-decl blank-line rule.
+                    let is_func_like = ctx == BraceCtx::Function
+                        || (ctx == BraceCtx::Block && self.brace_stack.is_empty());
+                    if is_func_like && self.config.newlines.blank_line_after_var_decl_block {
                         self.in_var_decl_block = true;
                         self.at_func_stmt_start = true;
                         self.saw_func_decl = false;
@@ -2210,7 +2217,11 @@ impl<'src> Fmt<'src> {
                     if ctx == BraceCtx::Type {
                         self.class_depth = self.class_depth.saturating_sub(1);
                     }
-                    if ctx == BraceCtx::Function {
+                    // brace_stack was already popped; a Block that left the stack
+                    // empty was a top-level macro-function body (see LBrace logic).
+                    let was_func_like = ctx == BraceCtx::Function
+                        || (ctx == BraceCtx::Block && self.brace_stack.is_empty());
+                    if was_func_like {
                         self.in_var_decl_block = false;
                         self.at_func_stmt_start = false;
                         self.force_blank_after_decls = false;
@@ -2261,10 +2272,13 @@ impl<'src> Fmt<'src> {
                         }
                         // Signal that the next token starts a new statement so the
                         // var-decl-block state machine can evaluate it.
-                        if self.in_var_decl_block
-                            && self.brace_stack.last() == Some(&BraceCtx::Function)
-                        {
-                            self.at_func_stmt_start = true;
+                        if self.in_var_decl_block {
+                            let top = self.brace_stack.last();
+                            let is_func_top = top == Some(&BraceCtx::Function)
+                                || (top == Some(&BraceCtx::Block) && self.brace_stack.len() == 1);
+                            if is_func_top {
+                                self.at_func_stmt_start = true;
+                            }
                         }
                     }
                     self.set_prev(TokenKind::Semi);
@@ -3788,6 +3802,30 @@ mod tests {
         assert!(
             !out.contains("int n = 4;\n\n"),
             "no blank line should split the var-decl block:\n{out}"
+        );
+    }
+
+    #[test]
+    fn var_decl_block_trailing_comment_before_ifdef() {
+        // Trailing inline /* comment */ after the last decl must not suppress
+        // the blank line that should appear before the following #ifdef.
+        let src = "void f(void) {\n    int a;\n    int b; /* note */\n#ifdef X\n    int c;\n#endif\n    a = 1;\n}\n";
+        let out = fmt_with_var_decl_blank(src);
+        assert!(
+            out.contains("b; /* note */\n\n#ifdef"),
+            "blank line must appear before #ifdef after trailing comment: {out}"
+        );
+    }
+
+    #[test]
+    fn var_decl_block_macro_function_body() {
+        // A macro-defined function body at global scope (e.g. SM_STATE(...) { })
+        // must activate the var-decl blank-line rule.
+        let src = "}\n\nSM_STATE(WPA, START) {\n    int x;\n    int y;\n#ifdef X\n    int z;\n#endif\n    x = 1;\n}\n";
+        let out = fmt_with_var_decl_blank(src);
+        assert!(
+            out.contains("int y;\n\n#ifdef") || out.contains("int y;\n\n#ifdef"),
+            "blank line must appear in SM_STATE macro body before #ifdef: {out}"
         );
     }
 

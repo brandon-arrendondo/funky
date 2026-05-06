@@ -150,6 +150,12 @@ repos:
         types: [c, c++]
 ```
 
+## Comparison with uncrustify
+
+funky is designed to produce output compatible with common uncrustify configurations.
+Known intentional differences and configurable deviations are documented in
+[DEVIATIONS.md](DEVIATIONS.md).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

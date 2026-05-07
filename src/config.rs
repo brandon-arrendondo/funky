@@ -34,7 +34,7 @@ impl Default for PreprocConfig {
     fn default() -> Self {
         Self {
             pp_indent: false,
-            endif_comment_space: 1,
+            endif_comment_space: 2,
         }
     }
 }
@@ -266,7 +266,7 @@ impl Default for SpacingConfig {
             align_right_cmt_style: AlignCmtStyle::Groups,
             align_enum_equ_span: 1,
             align_doxygen_cmt_span: 1,
-            align_on_tabstop: false,
+            align_on_tabstop: true,
         }
     }
 }

@@ -3375,17 +3375,29 @@ mod tests {
     }
 
     #[test]
-    fn endif_comment_space_default_normalizes_to_1() {
-        // Default endif_comment_space = 1: any existing spacing is normalized.
-        let src = "#ifndef GUARD_H\n#define GUARD_H\n#endif  /* GUARD_H */\n";
+    fn endif_comment_space_default_normalizes_to_2() {
+        // Default endif_comment_space = 2 (matches uncrustify): normalized to double space.
+        let src = "#ifndef GUARD_H\n#define GUARD_H\n#endif /* GUARD_H */\n";
         let out = fmt(src);
+        assert!(
+            out.contains("#endif  /* GUARD_H */"),
+            "expected double space before comment with default config: {out}"
+        );
+    }
+
+    #[test]
+    fn endif_comment_space_1_single_space() {
+        let mut cfg = Config::default();
+        cfg.preprocessor.endif_comment_space = 1;
+        let src = "#ifndef GUARD_H\n#define GUARD_H\n#endif  /* GUARD_H */\n";
+        let out = fmt_with(src, &cfg);
         assert!(
             out.contains("#endif /* GUARD_H */"),
             "expected single space before comment: {out}"
         );
         assert!(
             !out.contains("#endif  "),
-            "double space must not appear with default config: {out}"
+            "double space must not appear with endif_comment_space=1: {out}"
         );
     }
 

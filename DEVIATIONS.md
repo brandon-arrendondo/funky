@@ -35,10 +35,8 @@ Funky defaults differ but can be configured to match.
 | `extern "C" {` brace placement | Forces `{` on same line (Google/LLVM style) | `braces.extern_c_brace` | `"preserve"` — leaves brace wherever source has it, same as uncrustify with no `nl_extern_brace` rule |
 | Single trailing comment gap | 1 space | `spacing.align_right_cmt_style` | `"all"` — pads every trailing comment to `align_right_cmt_gap` spaces (though still won't exactly match arbitrary source column widths that uncrustify preserves) |
 | Space after C-style cast | No space: `(void *)ptr` | `spacing.space_after_cast` | `true` — emits a space between the closing `)` of a cast and the operand, matching uncrustify's default `(void *) ptr` |
-| `#endif` comment spacing | 1 space: `#endif /* GUARD_H */` | `preprocessor.endif_comment_space` | `2` — emits two spaces, matching uncrustify's `#endif  /* GUARD_H */` |
 | Newline before `else`/`else if` | `} else {` when `cuddle_else = true` | `newlines.nl_brace_else` | `true` — forces `}\nelse {` regardless of `cuddle_else`, matching uncrustify `nl_brace_else = add` |
 | Add braces to braceless `if`/`while`/`for` bodies | No braces added (bodies left as-is) | `braces.add_braces_to_if`, `braces.add_braces_to_while`, `braces.add_braces_to_for` | `true` for each — adds `{ }` to single-statement bodies, matching uncrustify `mod_full_brace_if/while/for = add`. Largest single source of diffs in the SQLite corpus (~284 of 354 files). |
-| Alignment column snapping | Columns aligned to `max_name_len + gap` (raw) | Columns snapped to next multiple of indent width (`align_on_tabstop = TRUE`) | `spacing.align_on_tabstop = true` — snaps trailing-comment and enum-`=` alignment columns to the next indent-width multiple, matching uncrustify's tabstop behavior. |
 
 ---
 

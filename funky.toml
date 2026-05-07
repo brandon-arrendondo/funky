@@ -32,7 +32,7 @@ align_right_cmt_span       = 3        # 0: off; ≥1: column-align trailing // a
 align_right_cmt_style      = "groups" # "groups": align multi-line groups only (matches uncrustify default); "all": normalize every trailing comment to min_gap
 align_enum_equ_span        = 1        # 0: off; ≥1: align enum = signs within span
 align_doxygen_cmt_span     = 1        # 0: off; ≥1: column-align /**< member comments
-align_on_tabstop           = false    # true: snap alignment columns to next indent-width multiple (matches uncrustify align_on_tabstop=TRUE)
+align_on_tabstop           = true     # snap alignment columns to next indent-width multiple (matches uncrustify align_on_tabstop=TRUE); set false for raw column
 
 [newlines]
 style           = "lf"   # "lf", "crlf", "native"
@@ -45,7 +45,7 @@ nl_brace_else                   = false  # true: newline before else/else-if (ov
 
 [preprocessor]
 pp_indent             = false  # indent #include/#define/nested #if relative to #if nesting depth (uncrustify pp_indent = add)
-endif_comment_space   = 1     # spaces between `#endif` and a trailing /* comment */; set to 2 to match uncrustify
+endif_comment_space   = 2     # spaces between `#endif` and a trailing /* comment */ (uncrustify default); set to 1 for tighter style
 
 [comments]
 normalize_block_comment_closing = false  # false: preserve bare */ (uncrustify default); true: rewrite to ` */` to match ` *` continuation style

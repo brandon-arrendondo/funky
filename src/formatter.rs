@@ -2843,6 +2843,7 @@ pub fn format<'src>(tokens: &[Token<'src>], config: &Config) -> Result<String, F
             normalize_single,
             config.spacing.align_on_tabstop,
             config.indent.width as usize,
+            config.spacing.align_right_cmt_span,
         )
     } else {
         output
@@ -2944,8 +2945,10 @@ fn trailing_comment_col(line: &str) -> Option<usize> {
     None
 }
 
-/// Align trailing `//` comments within groups of consecutive lines that all
-/// carry a trailing comment.  Each group is aligned to the widest code column.
+/// Align trailing `//` comments within groups of lines carrying trailing
+/// comments.  Lines without a comment are allowed inside a group when they
+/// are no more than `span` non-commented lines away from the next commented
+/// line (matches uncrustify's `align_right_cmt_span` semantics).
 /// `min_gap` is the minimum number of spaces between code end and comment.
 fn align_trailing_comments(
     output: &str,
@@ -2954,6 +2957,7 @@ fn align_trailing_comments(
     normalize_single: bool,
     on_tabstop: bool,
     tab_width: usize,
+    span: usize,
 ) -> String {
     let lines: Vec<&str> = output.split(nl).collect();
     let n = lines.len();
@@ -2963,17 +2967,32 @@ fn align_trailing_comments(
     let mut i = 0;
     while i < n {
         if cols[i].is_some() {
-            let mut j = i + 1;
-            while j < n && cols[j].is_some() {
-                j += 1;
+            // Extend the group as long as the next commented line is within
+            // `span` non-commented lines of the last commented line found.
+            let mut last_cmt = i;
+            let mut scan = i + 1;
+            loop {
+                // Find the next commented line from `scan`.
+                let next = (scan..n).find(|&k| cols[k].is_some());
+                match next {
+                    Some(k) if k - last_cmt < span => {
+                        last_cmt = k;
+                        scan = k + 1;
+                    }
+                    _ => break,
+                }
             }
-            let is_single = j == i + 1;
+            let j = last_cmt + 1; // exclusive end of group
+
+            let commented_in_group = (i..j).filter(|&k| cols[k].is_some()).count();
+            let is_single = commented_in_group == 1;
             // Skip single-line groups unless normalize_single is set.
             if is_single && !normalize_single {
                 i = j;
                 continue;
             }
             let max_code_len = (i..j)
+                .filter(|&k| cols[k].is_some())
                 .map(|k| lines[k][..cols[k].unwrap()].trim_end().len())
                 .max()
                 .unwrap();
@@ -2984,11 +3003,12 @@ fn align_trailing_comments(
                 raw_target
             };
             for k in i..j {
-                let col = cols[k].unwrap();
-                let code = lines[k][..col].trim_end();
-                let comment = &lines[k][col..];
-                let pad = target.max(code.len() + 1) - code.len();
-                result[k] = format!("{}{}{}", code, " ".repeat(pad), comment);
+                if let Some(col) = cols[k] {
+                    let code = lines[k][..col].trim_end();
+                    let comment = &lines[k][col..];
+                    let pad = target.max(code.len() + 1) - code.len();
+                    result[k] = format!("{}{}{}", code, " ".repeat(pad), comment);
+                }
             }
             i = j;
         } else {
@@ -4937,7 +4957,7 @@ mod tests {
     fn align_trailing_comments_struct() {
         let src =
             "struct Foo { int x; // short\nlong long_field; // longer\nchar c; // another\n};\n";
-        let out = fmt_with(src, &cfg_align(1));
+        let out = fmt_with(src, &cfg_align(2));
         // All three `//` should start at the same column.
         let positions: Vec<usize> = out.lines().filter_map(trailing_comment_col).collect();
         assert_eq!(
@@ -4955,7 +4975,7 @@ mod tests {
     fn align_trailing_comments_block_comment_style() {
         // /* */ inline block comments should be aligned the same as // comments.
         let src = "int a; /* short */\nlong long_field; /* longer */\n";
-        let out = fmt_with(src, &cfg_align(1));
+        let out = fmt_with(src, &cfg_align(2));
         let positions: Vec<usize> = out.lines().filter_map(trailing_comment_col).collect();
         assert_eq!(
             positions.len(),
@@ -5000,7 +5020,7 @@ mod tests {
     fn align_trailing_comments_single_line_groups_default() {
         // Default style (Groups): a lone trailing comment keeps 1 space — not normalized.
         let src = "uint8_t buf[] = {\n    0x00, /* bad id */\n    0x01, 0x02\n};\n";
-        let out = fmt_with(src, &cfg_align(1));
+        let out = fmt_with(src, &cfg_align(2));
         let line = out.lines().find(|l| l.contains("/* bad id */")).unwrap();
         // With Groups default the comment should be flush after the comma with 1 space.
         assert!(
@@ -5042,12 +5062,45 @@ mod tests {
 
     #[test]
     fn align_trailing_comments_blank_line_breaks_group() {
+        // span=2: only consecutive lines group; blank line breaks the group.
         let src = "int a; // g1\nint b; // g1\n\nint c; // g2\n";
-        let out = fmt_with(src, &cfg_align(1));
+        let out = fmt_with(src, &cfg_align(2));
         let cols: Vec<usize> = out.lines().filter_map(trailing_comment_col).collect();
         assert_eq!(cols.len(), 3, "expected 3 inline comments, got:\n{out}");
         // First two should be aligned (same group); third may differ.
         assert_eq!(cols[0], cols[1], "group-1 comments not aligned:\n{out}");
+    }
+
+    #[test]
+    fn align_trailing_comments_span_bridges_gap_line() {
+        // span=3 (matches uncrustify default): a single non-commented line
+        // between two commented lines is allowed within the same group.
+        // Distance between ptk and tptk = 2 (one gap line: ptk_set).
+        // 2 < span=3 → same group.
+        let src = "    struct wpa_ptk ptk; /* Derived PTK */\n    int ptk_set;\n    struct wpa_ptk tptk; /* Derived PTK during rekeying */\n";
+        let out = fmt_with(src, &Config::default());
+        let positions: Vec<usize> = out.lines().filter_map(trailing_comment_col).collect();
+        assert_eq!(positions.len(), 2, "expected 2 trailing comments:\n{out}");
+        assert_eq!(
+            positions[0], positions[1],
+            "ptk and tptk comments must be column-aligned (span=3 bridges 1 gap line):\n{out}"
+        );
+    }
+
+    #[test]
+    fn align_trailing_comments_span_does_not_bridge_two_gap_lines() {
+        // span=3: two non-commented lines between commented lines means
+        // distance=3, which is NOT < 3 → separate groups.
+        let src = "    struct ap_info *hnext; /* next entry in hash table list */\n    u8 addr[6];\n    u8 supported_rates[256];\n    int erp; /* ERP Info */\n";
+        let out = fmt_with(src, &Config::default());
+        let positions: Vec<usize> = out.lines().filter_map(trailing_comment_col).collect();
+        assert_eq!(positions.len(), 2, "expected 2 trailing comments:\n{out}");
+        // erp is isolated (single-line group), hnext is also single-line here.
+        // They must NOT be at the same column (Groups style, no normalization).
+        assert_ne!(
+            positions[0], positions[1],
+            "hnext and erp must NOT be co-aligned with span=3 (2-gap-line distance):\n{out}"
+        );
     }
 
     fn cfg_enum_align(span: usize) -> Config {

@@ -223,11 +223,16 @@ pub struct SpacingConfig {
     pub space_after_cast: bool,
     pub pointer_align: PointerAlign,
     pub space_inside_angle_brackets: bool,
-    /// Align trailing `//` comments across consecutive lines that all carry a
-    /// trailing comment.  0 = disabled; any positive value enables alignment.
+    /// Align trailing `//` and `/* */` inline comments within groups of nearby
+    /// lines.  0 = disabled.  N ≥ 1 enables alignment; commented lines are
+    /// grouped when the distance between consecutive commented lines is less
+    /// than N (so span=2 groups only consecutive lines, span=3 also bridges a
+    /// single non-commented line — matching uncrustify's `align_right_cmt_span`
+    /// semantics).
     pub align_right_cmt_span: usize,
     /// Minimum number of spaces between code and an aligned trailing comment.
-    /// Defaults to 1; increase to 2 or 3 to match uncrustify-style wider gaps.
+    /// Defaults to 1 (matches uncrustify — the tabstop rounding provides extra
+    /// spacing when needed). Increase to 2 or 3 for wider enforced gaps.
     pub align_right_cmt_gap: usize,
     /// Controls which trailing comments are normalized to `align_right_cmt_gap`
     /// spaces.
@@ -262,7 +267,7 @@ impl Default for SpacingConfig {
             pointer_align: PointerAlign::Name,
             space_inside_angle_brackets: false,
             align_right_cmt_span: 3,
-            align_right_cmt_gap: 3,
+            align_right_cmt_gap: 1,
             align_right_cmt_style: AlignCmtStyle::Groups,
             align_enum_equ_span: 1,
             align_doxygen_cmt_span: 1,

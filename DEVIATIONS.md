@@ -36,6 +36,7 @@ Funky defaults differ but can be configured to match.
 | Space after C-style cast | No space: `(void *)ptr` | `spacing.space_after_cast` | `true` — emits a space between the closing `)` of a cast and the operand, matching uncrustify's default `(void *) ptr` |
 | `#endif` comment spacing | 1 space: `#endif /* GUARD_H */` | `preprocessor.endif_comment_space` | `2` — emits two spaces, matching uncrustify's `#endif  /* GUARD_H */` |
 | Newline before `else`/`else if` | `} else {` when `cuddle_else = true` | `newlines.nl_brace_else` | `true` — forces `}\nelse {` regardless of `cuddle_else`, matching uncrustify `nl_brace_else = add` |
+| Add braces to braceless `if`/`while`/`for` bodies | No braces added (bodies left as-is) | `braces.add_braces_to_if`, `braces.add_braces_to_while`, `braces.add_braces_to_for` | `true` for each — adds `{ }` to single-statement bodies, matching uncrustify `mod_full_brace_if/while/for = add`. Largest single source of diffs in the SQLite corpus (~284 of 354 files). |
 
 ---
 

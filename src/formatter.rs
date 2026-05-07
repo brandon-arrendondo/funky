@@ -1758,10 +1758,10 @@ impl<'src> Fmt<'src> {
             return false;
         }
 
-        // No space between unary prefix op and its operand
-        if matches!(prev, TokenKind::PlusPlus | TokenKind::MinusMinus) {
-            // post-increment was before this token; could also be pre
-            // If prev ends an expression it was post, space is fine; if not, no space
+        // No space between unary prefix op and its operand (e.g. `++i`).
+        // But if next is a binary op (e.g. `*p++ = x`), fall through to
+        // the binary-op spacing rules below.
+        if matches!(prev, TokenKind::PlusPlus | TokenKind::MinusMinus) && !next.is_binary_op() {
             return false;
         }
 
@@ -2862,6 +2862,11 @@ fn round_up_to_multiple(n: usize, step: usize) -> usize {
 fn trailing_comment_col(line: &str) -> Option<usize> {
     let trimmed = line.trim_start();
     if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("/*") {
+        return None;
+    }
+    // Preprocessor lines (#endif, #else, #ifdef, etc.) have their own spacing
+    // rules and must not be included in trailing-comment alignment groups.
+    if trimmed.starts_with('#') {
         return None;
     }
     let bytes = line.as_bytes();

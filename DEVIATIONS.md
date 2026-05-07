@@ -34,6 +34,7 @@ Funky defaults differ but can be configured to match.
 | `extern "C" {` brace placement | Forces `{` on same line (Google/LLVM style) | `braces.extern_c_brace` | `"preserve"` — leaves brace wherever source has it, same as uncrustify with no `nl_extern_brace` rule |
 | Single trailing comment gap | 1 space | `spacing.align_right_cmt_style` | `"all"` — pads every trailing comment to `align_right_cmt_gap` spaces (though still won't exactly match arbitrary source column widths that uncrustify preserves) |
 | Space after C-style cast | No space: `(void *)ptr` | `spacing.space_after_cast` | `true` — emits a space between the closing `)` of a cast and the operand, matching uncrustify's default `(void *) ptr` |
+| `#endif` comment spacing | 1 space: `#endif /* GUARD_H */` | `preprocessor.endif_comment_space` | `2` — emits two spaces, matching uncrustify's `#endif  /* GUARD_H */` |
 
 ---
 
@@ -56,7 +57,6 @@ Known gaps not yet addressed.
 | Behavior | Funky | Uncrustify | Notes |
 |---|---|---|---|
 | `nl_brace_else`: newline before `else` | Always emits `} else {` on one line (K&R style) | Optionally places `}` and `else {` on separate lines when `nl_brace_else = add` | Config key and rule not yet implemented. |
-| `#endif` comment double-space | Emits `#endif /* comment */` with 1 space | Emits `#endif  /* comment */` with 2 spaces between `#endif` and the comment | Uncrustify pads `#endif` comment gap to 2 spaces. Funky normalizes to 1 space because preprocessor comment spacing is not a separate config key yet. |
 
 ---
 

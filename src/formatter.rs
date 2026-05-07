@@ -1876,6 +1876,17 @@ impl<'src> Fmt<'src> {
                         self.pp_brace_stack.pop();
                     }
 
+                    // Normalize the number of spaces between `#endif` and a
+                    // trailing `/*` comment.
+                    let normalized = if is_close {
+                        normalize_endif_spacing(
+                            &normalized,
+                            self.config.preprocessor.endif_comment_space,
+                        )
+                    } else {
+                        normalized
+                    };
+
                     if self.config.preprocessor.pp_indent {
                         // #endif and #elif/#else dedent before emit.
                         if is_close || is_reopen {
@@ -1884,7 +1895,7 @@ impl<'src> Fmt<'src> {
                         let indent_str = self.config.indent_str().repeat(self.pp_depth as usize);
                         // Write depth-prefix before the `#`.
                         self.write(&indent_str);
-                        self.write(trimmed);
+                        self.write(normalized.trim_start());
                         // #if and #elif/#else increase depth after emit.
                         if is_open || is_reopen {
                             self.pp_depth += 1;
@@ -2726,6 +2737,18 @@ pub fn format<'src>(tokens: &[Token<'src>], config: &Config) -> Result<String, F
     Ok(output)
 }
 
+/// Normalizes the whitespace between `#endif` and a trailing `/*` comment to
+/// exactly `spaces` spaces. Lines with no `/*` are returned unchanged.
+fn normalize_endif_spacing(line: &str, spaces: u32) -> String {
+    if let Some(pos) = line.find("/*") {
+        let before = line[..pos].trim_end();
+        let gap = " ".repeat(spaces as usize);
+        format!("{before}{gap}{}", &line[pos..])
+    } else {
+        line.to_string()
+    }
+}
+
 /// Returns the byte index of the `//` or `/*` that starts a trailing inline
 /// comment on `line`, or `None` if the line has no trailing comment (standalone
 /// comment lines and blank lines also return `None`).
@@ -3207,6 +3230,42 @@ mod tests {
                 .any(|l| l.contains("1,") && l.contains("// one")),
             "inline comment after second element must stay on same line, got:\n{out}"
         );
+    }
+
+    #[test]
+    fn endif_comment_space_default_normalizes_to_1() {
+        // Default endif_comment_space = 1: any existing spacing is normalized.
+        let src = "#ifndef GUARD_H\n#define GUARD_H\n#endif  /* GUARD_H */\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("#endif /* GUARD_H */"),
+            "expected single space before comment: {out}"
+        );
+        assert!(
+            !out.contains("#endif  "),
+            "double space must not appear with default config: {out}"
+        );
+    }
+
+    #[test]
+    fn endif_comment_space_2_matches_uncrustify() {
+        let mut cfg = Config::default();
+        cfg.preprocessor.endif_comment_space = 2;
+        let src = "#ifndef GUARD_H\n#define GUARD_H\n#endif /* GUARD_H */\n";
+        let out = fmt_with(src, &cfg);
+        assert!(
+            out.contains("#endif  /* GUARD_H */"),
+            "expected double space before comment: {out}"
+        );
+    }
+
+    #[test]
+    fn endif_no_comment_untouched() {
+        // A bare `#endif` with no comment must not be modified.
+        let src = "#ifndef GUARD_H\n#define GUARD_H\n#endif\n";
+        let out = fmt(src);
+        let endif_line = out.lines().find(|l| l.starts_with("#endif")).unwrap();
+        assert_eq!(endif_line, "#endif", "bare #endif must not gain trailing space: {out}");
     }
 
     #[test]
@@ -4949,7 +5008,7 @@ mod tests {
     fn pp_indent_enabled() {
         use crate::config::PreprocConfig;
         let cfg = Config {
-            preprocessor: PreprocConfig { pp_indent: true },
+            preprocessor: PreprocConfig { pp_indent: true, ..PreprocConfig::default() },
             ..Config::default()
         };
         let src =
@@ -4977,7 +5036,7 @@ mod tests {
     fn pp_indent_elif_else_at_outer_level() {
         use crate::config::PreprocConfig;
         let cfg = Config {
-            preprocessor: PreprocConfig { pp_indent: true },
+            preprocessor: PreprocConfig { pp_indent: true, ..PreprocConfig::default() },
             ..Config::default()
         };
         let src = "#ifdef WIN32\n#define PLATFORM \"windows\"\n#elif defined(LINUX)\n#define PLATFORM \"linux\"\n#else\n#define PLATFORM \"unknown\"\n#endif\n";

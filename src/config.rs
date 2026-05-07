@@ -18,12 +18,24 @@ pub struct Config {
 
 // ── Preprocessor ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct PreprocConfig {
     /// Indent preprocessor directives relative to their `#if`/`#ifdef`/`#ifndef`
     /// nesting depth (analogous to uncrustify's `pp_indent = add`). Default false.
     pub pp_indent: bool,
+    /// Number of spaces between `#endif` and a trailing `/*` comment.
+    /// Default 1. Set to 2 to match uncrustify's `#endif  /* GUARD_H */` style.
+    pub endif_comment_space: u32,
+}
+
+impl Default for PreprocConfig {
+    fn default() -> Self {
+        Self {
+            pp_indent: false,
+            endif_comment_space: 1,
+        }
+    }
 }
 
 // ── Ignore ───────────────────────────────────────────────────────────────────

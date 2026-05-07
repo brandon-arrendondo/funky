@@ -42,4 +42,5 @@ blank_line_after_open_brace     = false  # insert blank line after { in function
 merge_line_comment              = false  # hoist standalone // comment onto preceding {/}/; line
 
 [preprocessor]
-pp_indent = false  # indent #include/#define/nested #if relative to #if nesting depth (uncrustify pp_indent = add)
+pp_indent             = false  # indent #include/#define/nested #if relative to #if nesting depth (uncrustify pp_indent = add)
+endif_comment_space   = 1     # spaces between `#endif` and a trailing /* comment */; set to 2 to match uncrustify

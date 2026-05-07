@@ -1831,6 +1831,12 @@ impl<'src> Fmt<'src> {
         // We handle the "before" part: no space inserted when op is unary.
         // (The op itself was already emitted with whatever spacing it got.)
 
+        // After `;` inside a for-loop header, always emit a space regardless of
+        // what follows (unary *, &, +, -, !, ~, ++, --).
+        if prev == TokenKind::Semi && self.paren_depth > 0 {
+            return true;
+        }
+
         // After comma
         if prev == TokenKind::Comma {
             return self.config.spacing.space_after_comma;
@@ -4786,6 +4792,27 @@ mod tests {
         assert!(
             !out.contains(";--i") && out.contains("; --i"),
             "semicolon before -- must have a space: {out}"
+        );
+    }
+
+    #[test]
+    fn space_after_semi_before_unary_star_in_for() {
+        // `for (pos = cmd, len = 0;*pos != '\0'; pos++)` — unary * after ;
+        let out = fmt(
+            "void f(char *cmd) { char *pos; for (pos = cmd, len = 0;*pos != '\\0'; pos++) {} }\n",
+        );
+        assert!(
+            !out.contains(";*pos") && out.contains("; *pos"),
+            "semicolon before unary * in for-loop must have a space: {out}"
+        );
+    }
+
+    #[test]
+    fn space_after_semi_before_unary_amp_in_for() {
+        let out = fmt("void f() { for (int i = 0;&x < end; i++) {} }\n");
+        assert!(
+            !out.contains(";&x") && out.contains("; &x"),
+            "semicolon before unary & in for-loop must have a space: {out}"
         );
     }
 

@@ -1680,6 +1680,10 @@ impl<'src> Fmt<'src> {
             {
                 return true;
             }
+            // `foo(int x, ...)` — space after comma applies before `...`.
+            if next == TokenKind::DotDotDot && prev == TokenKind::Comma {
+                return self.config.spacing.space_after_comma;
+            }
             return false;
         }
 
@@ -5370,6 +5374,16 @@ mod tests {
         assert!(
             out.contains("sizeof(char *), cmp"),
             "space after comma must not be eaten by * inside sizeof(): {out}"
+        );
+    }
+
+    #[test]
+    fn space_before_varargs_ellipsis() {
+        // `foo(int x, ...)` — space_after_comma must apply before `...`.
+        let out = fmt("void foo(int x, ...);\n");
+        assert!(
+            out.contains(", ..."),
+            "space after comma must appear before ... in varargs, got:\n{out}"
         );
     }
 

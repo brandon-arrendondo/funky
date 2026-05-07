@@ -34,7 +34,6 @@ Funky defaults differ but can be configured to match.
 |---|---|---|---|
 | `extern "C" {` brace placement | Forces `{` on same line (Google/LLVM style) | `braces.extern_c_brace` | `"preserve"` — leaves brace wherever source has it, same as uncrustify with no `nl_extern_brace` rule |
 | Single trailing comment gap | 1 space | `spacing.align_right_cmt_style` | `"all"` — pads every trailing comment to `align_right_cmt_gap` spaces (though still won't exactly match arbitrary source column widths that uncrustify preserves) |
-| `#endif` comment spacing in header files | 1 space: `#endif /* GUARD_H */` | `preprocessor.endif_comment_space` | `2` — matches uncrustify's behavior of normalizing to 2 spaces when a header guard (`#ifndef`/`#define` pair) is present. Uncrustify preserves 1 space in `.c` files. |
 
 ---
 
@@ -44,6 +43,8 @@ Issues found during comparison that were resolved.
 
 | Behavior | Fix | Commit area |
 |---|---|---|
+| `#endif /* GUARD */` spacing in header files | Auto-detect `#ifndef FOO` + `#define FOO` header guard at file start; use 2 spaces for `#endif` comments in those files (matching uncrustify), 1 space elsewhere. Set `preprocessor.endif_comment_space = 2` to force 2 everywhere. | `formatter.rs` |
+| `*p++ = x` missing space before `=` | `PlusPlus`/`MinusMinus` "no space after unary" guard was suppressing binary op space. Fixed to fall through to binary-op spacing rules when next token is a binary operator. | `formatter.rs` |
 | Binary `-` after `sizeof(x)` misclassified as unary — `sizeof(buf) -1` instead of `sizeof(buf) - 1` | Added `prev_is_sizeof_like()` guard; `sizeof`/`alignof`/`decltype`/`typeid` preceding `(` no longer mark the paren as a cast close | `formatter.rs` |
 | `blank_line_after_var_decl_block`: trailing inline `/* comment */` after last decl suppresses blank line before following `#ifdef` | Fixed `flush_blank_lines` to require 2 newlines (not 1) when not at line-start, so the blank line appears after the comment line is terminated | `formatter.rs` |
 | `blank_line_after_var_decl_block`: macro-defined function bodies at global scope (`SM_STATE(...)` pattern) not recognized as function bodies | Fixed LBrace/Semi/RBrace handlers to treat a top-level `Block` brace (stack was empty when opened) the same as `Function` for the var-decl rule | `formatter.rs` |

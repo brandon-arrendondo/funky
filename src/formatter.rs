@@ -1443,8 +1443,10 @@ impl<'src> Fmt<'src> {
                     | TokenKind::Dot      // member access: s.field & MASK
                     | TokenKind::ArrowStar
                     | TokenKind::DotStar
-            ) || (before == TokenKind::Keyword
-                && matches!(self.tokens[b].lexeme, "return" | "case" | "throw"))
+            ) || matches!(
+                before,
+                TokenKind::KwReturn | TokenKind::KwCase | TokenKind::KwThrow
+            )
                 // `(` preceded by an expression op means we're in an expression subgroup
                 || (before == TokenKind::LParen && b > 0 && {
                     let mut bb = b - 1;
@@ -1487,11 +1489,14 @@ impl<'src> Fmt<'src> {
                             | TokenKind::GtGtEq
                             | TokenKind::Comma
                             | TokenKind::LParen
-                    ) || (outer == TokenKind::Keyword
-                        && matches!(
-                            self.tokens[bb].lexeme,
-                            "if" | "while" | "for" | "switch" | "return" | "case" | "throw"
-                        ))
+                            | TokenKind::KwIf
+                            | TokenKind::KwWhile
+                            | TokenKind::KwFor
+                            | TokenKind::KwSwitch
+                            | TokenKind::KwReturn
+                            | TokenKind::KwCase
+                            | TokenKind::KwThrow
+                    )
                 });
             if is_expr_op {
                 return false;
@@ -4840,6 +4845,35 @@ mod tests {
         assert!(
             out.contains("field & MASK"),
             "& after . must be binary AND with space on both sides, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn binary_amp_in_if_condition_no_space_in_source() {
+        // `if (auth_type &WPS_AUTH_WPA2PSK)` — binary & inside if() with no space in source.
+        // Previously misclassified as pointer declarator due to KwIf not matching Keyword.
+        let out = fmt("void f(int auth_type) { if (auth_type &WPS_AUTH_WPA2PSK) {} }\n");
+        assert!(
+            out.contains("auth_type & WPS_AUTH_WPA2PSK"),
+            "& in if() must be binary AND with space on both sides, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn binary_pipe_in_if_condition_no_space_in_source() {
+        let out = fmt("void f(int x) { if (x |MASK) {} }\n");
+        assert!(
+            out.contains("x | MASK"),
+            "| in if() must be binary OR with space on both sides, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn binary_amp_in_while_condition() {
+        let out = fmt("void f(int flags) { while (flags &MASK) {} }\n");
+        assert!(
+            out.contains("flags & MASK"),
+            "& in while() must be binary AND, got:\n{out}"
         );
     }
 

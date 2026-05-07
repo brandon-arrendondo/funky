@@ -1383,6 +1383,10 @@ impl<'src> Fmt<'src> {
                     | TokenKind::CaretEq
                     | TokenKind::LtLtEq
                     | TokenKind::GtGtEq
+                    | TokenKind::Arrow    // member access: p->field & MASK
+                    | TokenKind::Dot      // member access: s.field & MASK
+                    | TokenKind::ArrowStar
+                    | TokenKind::DotStar
             ) || (before == TokenKind::Keyword
                 && matches!(self.tokens[b].lexeme, "return" | "case" | "throw"))
                 // `(` preceded by an expression op means we're in an expression subgroup
@@ -4572,6 +4576,26 @@ mod tests {
         assert!(
             out.contains("/* comment */ +"),
             "binary op after inline block comment must have a leading space, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn binary_amp_after_arrow_not_pointer_decl() {
+        // `p->flags & MASK` — the `&` follows a member-access chain and must be
+        // treated as bitwise AND, not a pointer declarator.
+        let out = fmt("void f(void) { if (p->db->flags & MASK) {} }\n");
+        assert!(
+            out.contains("flags & MASK"),
+            "& after -> must be binary AND with space on both sides, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn binary_amp_after_dot_not_pointer_decl() {
+        let out = fmt("void f(void) { if (s.field & MASK) {} }\n");
+        assert!(
+            out.contains("field & MASK"),
+            "& after . must be binary AND with space on both sides, got:\n{out}"
         );
     }
 

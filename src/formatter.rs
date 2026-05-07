@@ -2789,23 +2789,6 @@ impl<'src> Fmt<'src> {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 pub fn format<'src>(tokens: &[Token<'src>], config: &Config) -> Result<String, FunkyError> {
-    // Override endif_comment_space to 2 for header-guard files, matching
-    // uncrustify's behaviour of normalizing #endif comment spacing in headers.
-    let header_cfg: Config;
-    let config: &Config =
-        if config.preprocessor.endif_comment_space == 1 && has_header_guard(tokens) {
-            header_cfg = Config {
-                preprocessor: crate::config::PreprocConfig {
-                    endif_comment_space: 2,
-                    ..config.preprocessor.clone()
-                },
-                ..config.clone()
-            };
-            &header_cfg
-        } else {
-            config
-        };
-
     let injected;
     let tokens: &[Token<'src>] = if config.braces.add_braces_to_if
         || config.braces.add_braces_to_while
@@ -2847,37 +2830,6 @@ pub fn format<'src>(tokens: &[Token<'src>], config: &Config) -> Result<String, F
         output
     };
     Ok(output)
-}
-
-/// Returns `true` when the token stream starts with a header guard:
-/// `#ifndef FOO` immediately followed by `#define FOO` (whitespace/newlines may
-/// appear between them, but no other code).  Uncrustify normalizes `#endif` comment
-/// spacing to 2 spaces in files that have a header guard.
-fn has_header_guard(tokens: &[Token<'_>]) -> bool {
-    let mut preproc_seen = 0usize;
-    let mut guard_name = String::new();
-    for tok in tokens {
-        match tok.kind {
-            TokenKind::Whitespace | TokenKind::Newline => continue,
-            TokenKind::PreprocLine => {
-                let text = tok.lexeme.trim();
-                if preproc_seen == 0 {
-                    if let Some(rest) = text.strip_prefix("#ifndef ") {
-                        guard_name = rest.split_whitespace().next().unwrap_or("").to_owned();
-                        preproc_seen = 1;
-                    } else {
-                        return false;
-                    }
-                } else {
-                    // Second preproc must be `#define <same name>`.
-                    let expected = format!("#define {guard_name}");
-                    return text.starts_with(&expected);
-                }
-            }
-            _ => return false,
-        }
-    }
-    false
 }
 
 /// Normalizes the whitespace between `#endif` and a trailing `/*` comment to
@@ -3512,20 +3464,19 @@ mod tests {
     }
 
     #[test]
-    fn endif_comment_space_header_guard_auto_uses_2() {
-        // Header guard files automatically get 2-space #endif, matching uncrustify.
+    fn endif_comment_space_header_guard_uses_1_by_default() {
+        // Header guard files get 1-space #endif by default (uncrustify's actual
+        // rule is too complex to replicate — documented as By Design deviation).
         let src = "#ifndef GUARD_H\n#define GUARD_H\nint x;\n#endif /* GUARD_H */\n";
         let out = fmt(src);
         assert!(
-            out.contains("#endif  /* GUARD_H */"),
-            "header-guard file should get 2-space #endif by default: {out}"
+            out.contains("#endif /* GUARD_H */"),
+            "header-guard file should get 1-space #endif with default config: {out}"
         );
     }
 
     #[test]
     fn endif_comment_space_1_single_space() {
-        // Explicit space=1 overrides header-guard auto-detection.
-        // Use a non-header-guard source to test the forced-1 path.
         let mut cfg = Config::default();
         cfg.preprocessor.endif_comment_space = 1;
         let src = "#ifdef FOO\nint x;\n#endif  /* FOO */\n";

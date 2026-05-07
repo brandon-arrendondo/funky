@@ -23,6 +23,7 @@ than an active style choice.
 | Extra blank line before section block comments between functions | Does not add extra blank line | Adds one extra blank line before `/* … */` section comments that follow `}` | Separate uncrustify rule (`nl_min_blankline_before_block_comment` equivalent). Not related to `nl_func_var_def_blk`. Not implemented in funky; affects ~15 files in the hostap comparison. |
 | Tab→space inside `#define` macro bodies | Passes `PreprocLine` tokens verbatim; tabs inside macros are not touched | Normalizes whitespace inside macro bodies, converting tabs to spaces | Funky treats all preprocessor lines as opaque by design. Altering whitespace inside a macro body could break stringification (`#`), token-pasting (`##`), or alignment-sensitive macros. The verbatim pass-through is intentional and correct. |
 | Block comment `**`-continuation line indentation | Preserves source indentation on `**` continuation lines | Re-indents `**` continuation lines to match the enclosing block's indent level | Funky treats block comment interiors as opaque content (analogous to preprocessor lines). Rewriting internal `**` indentation would risk misaligning comments written with intentional column alignment. Passive preservation is safer. |
+| `#endif /* ... */` comment spacing | Always emits 1 space between `#endif` and `/*` comment | Uses 2 spaces for some `#endif` lines (appears to depend on whether the enclosing `#ifdef` block contains a `#else` or other complex nesting — no documented rule) | Uncrustify's behaviour is internally inconsistent and not driven by a documented config option. Funky's 1-space is deterministic. Use `preprocessor.endif_comment_space = 2` to force 2 everywhere. |
 
 ---
 
@@ -43,7 +44,6 @@ Issues found during comparison that were resolved.
 
 | Behavior | Fix | Commit area |
 |---|---|---|
-| `#endif /* GUARD */` spacing in header files | Auto-detect `#ifndef FOO` + `#define FOO` header guard at file start; use 2 spaces for `#endif` comments in those files (matching uncrustify), 1 space elsewhere. Set `preprocessor.endif_comment_space = 2` to force 2 everywhere. | `formatter.rs` |
 | `*p++ = x` missing space before `=` | `PlusPlus`/`MinusMinus` "no space after unary" guard was suppressing binary op space. Fixed to fall through to binary-op spacing rules when next token is a binary operator. | `formatter.rs` |
 | Binary `-` after `sizeof(x)` misclassified as unary — `sizeof(buf) -1` instead of `sizeof(buf) - 1` | Added `prev_is_sizeof_like()` guard; `sizeof`/`alignof`/`decltype`/`typeid` preceding `(` no longer mark the paren as a cast close | `formatter.rs` |
 | `blank_line_after_var_decl_block`: trailing inline `/* comment */` after last decl suppresses blank line before following `#ifdef` | Fixed `flush_blank_lines` to require 2 newlines (not 1) when not at line-start, so the blank line appears after the comment line is terminated | `formatter.rs` |

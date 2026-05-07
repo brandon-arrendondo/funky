@@ -145,6 +145,27 @@ fn inj_copy_stmt<'src>(
                     TokenKind::Semi if depth == 0 => {
                         out.push(t);
                         *i += 1;
+                        // Carry a trailing inline comment along with the statement
+                        // so that `return -1; /* note */` stays together when
+                        // braces are injected around the statement.
+                        let j = {
+                            let mut k = *i;
+                            while k < tokens.len() && tokens[k].kind == TokenKind::Whitespace {
+                                k += 1;
+                            }
+                            k
+                        };
+                        if j < tokens.len()
+                            && matches!(
+                                tokens[j].kind,
+                                TokenKind::CommentBlock | TokenKind::CommentLine
+                            )
+                        {
+                            while *i <= j {
+                                out.push(tokens[*i].clone());
+                                *i += 1;
+                            }
+                        }
                         return;
                     }
                     _ => {}
@@ -5898,6 +5919,25 @@ mod tests {
         let open_count = out.chars().filter(|&c| c == '{').count();
         // fn body + outer-if body + inner-if body + inner-else body = 4
         assert_eq!(open_count, 4, "expected 4 braces:\n{out}");
+    }
+
+    #[test]
+    fn add_braces_preserves_trailing_block_comment() {
+        // Inline `/* comment */` on the same line as the statement must stay
+        // with the statement when braces are injected, not fall outside the `}`.
+        let src = "void f() { if (cond)\n    return -1; /* no good */\n}\n";
+        let out = fmt_with(src, &cfg_add_braces_if());
+        assert!(
+            out.contains("return -1; /* no good */"),
+            "inline comment must stay on the return line:\n{out}"
+        );
+        // The comment must appear before the closing brace of the if-body.
+        let comment_pos = out.find("/* no good */").unwrap();
+        let after_comment = &out[comment_pos..];
+        assert!(
+            after_comment.contains('}'),
+            "closing brace must come after the comment:\n{out}"
+        );
     }
 
     // ── nl_fcall_brace: macro call + block body ───────────────────────────────

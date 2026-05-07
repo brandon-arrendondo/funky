@@ -2002,6 +2002,21 @@ impl<'src> Fmt<'src> {
                     } else {
                         normalized
                     };
+                    // Strip trailing spaces from each line inside the comment.
+                    let normalized = if normalized.contains(' ') || normalized.contains('\t') {
+                        let mut out = String::with_capacity(normalized.len());
+                        let mut first = true;
+                        for line in normalized.split(nl) {
+                            if !first {
+                                out.push_str(nl);
+                            }
+                            first = false;
+                            out.push_str(line.trim_end());
+                        }
+                        out
+                    } else {
+                        normalized
+                    };
                     self.write(&normalized);
                     self.set_prev(TokenKind::CommentBlock);
                 }
@@ -4636,6 +4651,17 @@ mod tests {
         assert!(
             out.contains(" */") && !out.contains("  */"),
             "already-correct */ must not be double-spaced, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn block_comment_trailing_spaces_stripped() {
+        // Source has trailing spaces on the continuation and closing lines.
+        let src = "/*   \n * line with trailing   \n */   \nvoid f() {}\n";
+        let out = fmt(src);
+        assert!(
+            !out.lines().any(|l| l.ends_with(' ')),
+            "trailing spaces must be stripped from all comment lines, got:\n{out}"
         );
     }
 

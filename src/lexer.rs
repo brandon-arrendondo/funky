@@ -481,11 +481,10 @@ impl<'src> Lexer<'src> {
                 None => {
                     return Err(self.lex_err("unterminated block comment", line, col));
                 }
-                Some('*') => {
-                    if self.cursor.eat_if('/') {
-                        return Ok(());
-                    }
+                Some('*') if self.cursor.eat_if('/') => {
+                    return Ok(());
                 }
+                Some('*') => {}
                 _ => {}
             }
         }

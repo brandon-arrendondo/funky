@@ -1498,6 +1498,8 @@ impl<'src> Fmt<'src> {
                             | TokenKind::GtGtEq
                             | TokenKind::Comma
                             | TokenKind::LParen
+                            | TokenKind::Bang   // !(key_flag & MASK)
+                            | TokenKind::Tilde  // ~(key_flag & MASK)
                             | TokenKind::KwIf
                             | TokenKind::KwWhile
                             | TokenKind::KwFor
@@ -1750,8 +1752,6 @@ impl<'src> Fmt<'src> {
             {
                 return true;
             }
-            // `for (i = 0;; i++)` — space between consecutive `;` only when the
-            // following clause is non-empty (handled in the Semi arm directly).
             // `foo(int x, ...)` — space after comma applies before `...`.
             if next == TokenKind::DotDotDot && prev == TokenKind::Comma {
                 return self.config.spacing.space_after_comma;
@@ -2399,16 +2399,6 @@ impl<'src> Fmt<'src> {
                     self.flush_blank_lines();
                     self.pending_type = false;
                     self.pending_extern_c = false;
-                    // `for (init;; inc)` — space between consecutive semicolons, but
-                    // only when the clause after the second `;` is non-empty (i.e.
-                    // `for (;;)` infinite-loop form keeps no space; uncrustify
-                    // normalizes that form to no-space).
-                    if self.paren_depth > 0
-                        && self.prev == Some(TokenKind::Semi)
-                        && self.peek_non_ws_kind() != Some(TokenKind::RParen)
-                    {
-                        self.write(" ");
-                    }
                     self.write(";");
                     // Don't emit newline if we're inside parens (for-loop header).
                     if self.paren_depth == 0 {
@@ -3075,22 +3065,40 @@ fn enum_eq_col(line: &str) -> Option<usize> {
         return None;
     }
     let bytes = line.as_bytes();
-    for i in 0..bytes.len() {
-        if bytes[i] != b'=' {
-            continue;
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if in_string || in_char => {
+                i += 2; // skip escaped character
+                continue;
+            }
+            b'"' if !in_char => {
+                in_string = !in_string;
+            }
+            b'\'' if !in_string => {
+                in_char = !in_char;
+            }
+            b'=' if !in_string && !in_char => {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'=' {
+                    i += 1;
+                    continue; // ==
+                }
+                if i > 0
+                    && matches!(
+                        bytes[i - 1],
+                        b'!' | b'<' | b'>' | b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|' | b'^'
+                    )
+                {
+                    i += 1;
+                    continue; // compound op
+                }
+                return Some(i);
+            }
+            _ => {}
         }
-        if i + 1 < bytes.len() && bytes[i + 1] == b'=' {
-            continue; // ==
-        }
-        if i > 0
-            && matches!(
-                bytes[i - 1],
-                b'!' | b'<' | b'>' | b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|' | b'^'
-            )
-        {
-            continue; // compound op
-        }
-        return Some(i);
+        i += 1;
     }
     None
 }
@@ -4789,11 +4797,11 @@ mod tests {
 
     #[test]
     fn space_between_consecutive_semis_in_for() {
-        // for (i = 0;; i++) — empty condition clause: space added between ;;
+        // for (i = 0;; i++) — no space between consecutive ;;, space after (matching uncrustify)
         let out = fmt("void f() { for (i = 0;; i++) {} }\n");
         assert!(
-            out.contains("for (i = 0; ; i++)"),
-            "empty for-clause needs space between consecutive semicolons: {out}"
+            out.contains("for (i = 0;; i++)"),
+            "for-loop with empty condition must not get space between ;; : {out}"
         );
         // for (;;) — infinite loop: no space (uncrustify normalizes to no-space)
         let out2 = fmt("void f() { for (;;) {} }\n");

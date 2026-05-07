@@ -13,6 +13,7 @@ pub struct Config {
     pub spacing: SpacingConfig,
     pub newlines: NewlineConfig,
     pub preprocessor: PreprocConfig,
+    pub comments: CommentConfig,
     pub ignore: IgnoreConfig,
 }
 
@@ -36,6 +37,19 @@ impl Default for PreprocConfig {
             endif_comment_space: 1,
         }
     }
+}
+
+// ── Comments ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct CommentConfig {
+    /// When true, a bare `*/` closing a multi-line block comment is rewritten
+    /// to ` */` (adds a leading space) to match the ` *`-continuation style.
+    /// Only applies when the comment does not use `**`-style continuations.
+    /// Default false — preserve the source as-is, matching uncrustify's
+    /// default of not modifying block comment interiors.
+    pub normalize_block_comment_closing: bool,
 }
 
 // ── Ignore ───────────────────────────────────────────────────────────────────
@@ -378,6 +392,9 @@ final_newline   = true
 blank_line_after_var_decl_block = true
 blank_line_after_open_brace     = false
 merge_line_comment              = false
+
+[comments]
+normalize_block_comment_closing = true
 "#;
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.indent.width, 4);
@@ -391,6 +408,7 @@ merge_line_comment              = false
         assert!(cfg.spacing.space_before_keyword_paren);
         assert!(!cfg.spacing.space_before_call_paren);
         assert_eq!(cfg.newlines.max_blank_lines, 2);
+        assert!(cfg.comments.normalize_block_comment_closing);
         assert!(cfg.ignore.patterns.is_empty());
     }
 

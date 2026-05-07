@@ -1957,13 +1957,17 @@ impl<'src> Fmt<'src> {
                         .replace('\n', nl);
                     // Ensure the closing `*/` has a leading space when it sits
                     // flush at the start of a line (e.g. `\n*/` → `\n */`).
+                    // When the config option is enabled, rewrite a bare `*/`
+                    // closing line to ` */` to match ` *`-continuation style.
                     // Exception: SQLite-style `**`-continuation comments already
                     // have `*/` at column 0 — don't add a spurious space there.
                     let uses_double_star = normalized
                         .split(nl)
                         .skip(1)
                         .any(|line| line.starts_with("**"));
-                    let normalized = if !uses_double_star && normalized.contains(&format!("{nl}*/"))
+                    let normalized = if self.config.comments.normalize_block_comment_closing
+                        && !uses_double_star
+                        && normalized.contains(&format!("{nl}*/"))
                     {
                         normalized.replace(&format!("{nl}*/"), &format!("{nl} */"))
                     } else {
@@ -4533,15 +4537,32 @@ mod tests {
     }
 
     #[test]
-    fn block_comment_closing_gets_space() {
+    fn block_comment_closing_preserve_by_default() {
+        // Default config: bare `*/` is preserved as-is (uncrustify parity).
         let out = fmt("/*\n * foo\n*/\nvoid f() {}\n");
         assert!(
+            out.contains("\n*/"),
+            "default config must preserve flush closing */, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn block_comment_closing_gets_space_when_opt_in() {
+        use crate::config::CommentConfig;
+        let cfg = Config {
+            comments: CommentConfig {
+                normalize_block_comment_closing: true,
+            },
+            ..Config::default()
+        };
+        let out = fmt_with("/*\n * foo\n*/\nvoid f() {}\n", &cfg);
+        assert!(
             out.contains(" */"),
-            "closing */ must have a leading space, got:\n{out}"
+            "normalize_block_comment_closing=true: closing */ must have a leading space, got:\n{out}"
         );
         assert!(
             !out.contains("\n*/"),
-            "closing */ must not be flush at line start, got:\n{out}"
+            "normalize_block_comment_closing=true: closing */ must not be flush at line start, got:\n{out}"
         );
     }
 
@@ -4556,9 +4577,17 @@ mod tests {
 
     #[test]
     fn block_comment_double_star_style_closing_no_space() {
-        // SQLite-style: `/*\n** text\n*/` — closing `*/` must NOT get a leading space.
+        // SQLite-style: `/*\n** text\n*/` — closing `*/` must NOT get a leading space
+        // even when normalize_block_comment_closing is enabled.
+        use crate::config::CommentConfig;
+        let cfg = Config {
+            comments: CommentConfig {
+                normalize_block_comment_closing: true,
+            },
+            ..Config::default()
+        };
         let src = "/*\n** SQLite style\n** continuation\n*/\nvoid f() {}\n";
-        let out = fmt(src);
+        let out = fmt_with(src, &cfg);
         assert!(
             out.contains("\n*/"),
             "double-star style closing */ must stay flush at col 0, got:\n{out}"
@@ -4571,8 +4600,15 @@ mod tests {
 
     #[test]
     fn block_comment_closing_already_spaced_unchanged() {
+        use crate::config::CommentConfig;
+        let cfg = Config {
+            comments: CommentConfig {
+                normalize_block_comment_closing: true,
+            },
+            ..Config::default()
+        };
         let src = "/*\n * foo\n */\nvoid f() {}\n";
-        let out = fmt(src);
+        let out = fmt_with(src, &cfg);
         assert!(
             out.contains(" */") && !out.contains("  */"),
             "already-correct */ must not be double-spaced, got:\n{out}"

@@ -45,3 +45,6 @@ nl_brace_else                   = false  # true: newline before else/else-if (ov
 [preprocessor]
 pp_indent             = false  # indent #include/#define/nested #if relative to #if nesting depth (uncrustify pp_indent = add)
 endif_comment_space   = 1     # spaces between `#endif` and a trailing /* comment */; set to 2 to match uncrustify
+
+[comments]
+normalize_block_comment_closing = false  # false: preserve bare */ (uncrustify default); true: rewrite to ` */` to match ` *` continuation style

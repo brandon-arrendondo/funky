@@ -386,6 +386,10 @@ struct Fmt<'src> {
     /// Set when `case`/`default` keyword is emitted so the following `:` gets
     /// a newline after it instead of continuing on the same line.
     in_case_label: bool,
+    /// Set after emitting a case/default label colon (`case X:` or `default:`).
+    /// Used so that a `{` on the next line is treated as a block, not an
+    /// initializer list.
+    last_was_case_colon: bool,
     /// Set when `public`/`private`/`protected` is emitted so the following `:`
     /// gets a newline after it.
     in_access_label: bool,
@@ -467,6 +471,7 @@ impl<'src> Fmt<'src> {
             pending_type: false,
             pending_extern_c: false,
             in_case_label: false,
+            last_was_case_colon: false,
             in_access_label: false,
             in_goto_label: false,
             suppress_next_space: false,
@@ -648,6 +653,7 @@ impl<'src> Fmt<'src> {
             || (self.last_was_operator_overload
                 && matches!(kind, TokenKind::RBracket | TokenKind::RParen));
         self.after_operator_kw = false;
+        self.last_was_case_colon = false;
     }
 
     fn space(&mut self) {
@@ -1316,6 +1322,9 @@ impl<'src> Fmt<'src> {
                 // `class Foo : public Bar {` — colon ends the base-class list.
                 if self.pending_type {
                     BraceCtx::Type
+                } else if self.last_was_case_colon {
+                    // `case X: {` or `default: {` — block following a case label.
+                    BraceCtx::Block
                 } else {
                     BraceCtx::Other
                 }
@@ -2290,6 +2299,21 @@ impl<'src> Fmt<'src> {
                         && self.large_flat_initializer_end().is_some();
                     self.brace_stack.push(ctx);
                     self.large_init_stack.push(is_large_init);
+                    // `case X: {` — the case-label colon already incremented
+                    // indent_level (via indent_switch_case). The block `{` should
+                    // take over that indent slot rather than adding a new one, so the
+                    // body sits at case_body_level + 1 (not + 2).
+                    if ctx == BraceCtx::Block
+                        && self.last_was_case_colon
+                        && self.config.indent.indent_switch_case
+                    {
+                        // Undo the case-body indent; the block's own +1 below
+                        // restores the same net level.
+                        self.indent_level = self.indent_level.saturating_sub(1);
+                        if let Some(active) = self.case_body_stack.last_mut() {
+                            *active = false;
+                        }
+                    }
                     if ctx != BraceCtx::ExternC {
                         self.indent_level += 1;
                     }
@@ -2508,6 +2532,7 @@ impl<'src> Fmt<'src> {
                         }
                     }
                     self.write(":");
+                    let is_case_colon = self.in_case_label;
                     if self.in_case_label {
                         self.in_case_label = false;
                         self.nl();
@@ -2528,6 +2553,8 @@ impl<'src> Fmt<'src> {
                         self.skip_next_newline = true;
                     }
                     self.set_prev(TokenKind::Colon);
+                    // Set AFTER set_prev() so set_prev() doesn't clear it.
+                    self.last_was_case_colon = is_case_colon;
                 }
 
                 // ── switch keyword — arm to set pending_switch ────────────────
@@ -3716,6 +3743,29 @@ mod tests {
         assert!(
             out.lines().any(|l| l.starts_with("        y")),
             "case body not at switch-body level:\n{out}"
+        );
+    }
+
+    #[test]
+    fn case_label_followed_by_brace_on_next_line() {
+        // Source pattern from hostap: `case X:\n{\n    body\n}`
+        // The `{` must be attached to the case label (KR style) and the body
+        // must be at case-body indentation (not double-indented).
+        let src = "void f(int x){\nswitch(x){\ncase 1:\n{\nint y=x;\nbreak;\n}\ncase 2:\n{\nint z=x;\nbreak;\n}\n}\n}";
+        let out = fmt(src);
+        assert!(
+            out.contains("case 1: {"),
+            "case brace must be attached to case label: {out}"
+        );
+        // Body must be at 12 spaces (3 indent levels: fn=1, switch=2, case-body=3).
+        assert!(
+            out.lines().any(|l| l == "            int y = x;"),
+            "case block body must be at 12 spaces, not over-indented: {out}"
+        );
+        // Next case label must be at 8 spaces (same as before).
+        assert!(
+            out.lines().any(|l| l == "        case 2: {"),
+            "second case label must be at 8 spaces: {out}"
         );
     }
 

@@ -9,8 +9,8 @@ indent_goto_labels  = false  # false: goto labels at column 0 (uncrustify indent
 
 [braces]
 style = "kr"       # "kr" (same line), "allman" (own line), "stroustrup"
-cuddle_else         = false
-cuddle_catch        = true
+cuddle_else         = false  # false: } \n else { (matches uncrustify nl_brace_else=add); true: } else {
+cuddle_catch        = false  # false: } \n catch (matches uncrustify); true: } catch
 collapse_empty_body = true
 fn_brace_newline    = true   # true: function-def { on its own line; false: follow style
 extern_c_brace      = "force_same_line"  # "force_same_line" (Google/LLVM) or "preserve" (match uncrustify default)
@@ -41,7 +41,7 @@ final_newline   = true
 blank_line_after_var_decl_block = true   # insert blank line after leading var decls in a function
 blank_line_after_open_brace     = false  # insert blank line after { in function/block bodies
 merge_line_comment              = false  # hoist standalone // comment onto preceding {/}/; line
-nl_brace_else                   = false  # true: newline before else/else-if (overrides cuddle_else), matches uncrustify nl_brace_else=add
+nl_brace_else                   = true   # true: newline before else/else-if (matches uncrustify nl_brace_else=add); false: cuddle_else controls
 
 [preprocessor]
 pp_indent             = false  # indent #include/#define/nested #if relative to #if nesting depth (uncrustify pp_indent = add)

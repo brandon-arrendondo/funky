@@ -1801,6 +1801,7 @@ impl<'src> Fmt<'src> {
         }
 
         // Colon: ternary gets space on both sides; case/label/base-class does not.
+        // Bitfield colons are handled directly in the Colon arm, not here.
         if next == TokenKind::Colon {
             return self.ternary_depth > 0;
         }
@@ -2409,6 +2410,20 @@ impl<'src> Fmt<'src> {
                         && !self.in_goto_label
                     {
                         self.ternary_depth = self.ternary_depth.saturating_sub(1);
+                        if !self.at_line_start {
+                            self.space();
+                        }
+                    } else if !self.in_case_label
+                        && !self.in_access_label
+                        && !self.in_goto_label
+                        && self.prev == Some(TokenKind::Ident)
+                        && self.peek_non_ws_kind() == Some(TokenKind::LitInt)
+                        && self
+                            .brace_stack
+                            .last()
+                            .is_some_and(|ctx| *ctx == BraceCtx::Type)
+                    {
+                        // Bitfield colon: `field:N` → `field : N`
                         if !self.at_line_start {
                             self.space();
                         }
@@ -3213,12 +3228,31 @@ mod tests {
     }
 
     #[test]
-    fn nl_brace_else_default_cuddles() {
-        // Default: nl_brace_else=false, cuddle_else=true → `} else {` on one line.
+    fn nl_brace_else_default_newline() {
+        // Default: nl_brace_else=true → `}\nelse {` regardless of cuddle_else.
+        let src = "void f() { if (x) { a(); } else { b(); } }\n";
+        let out = fmt(src);
+        assert!(
+            !out.contains("} else {"),
+            "default nl_brace_else=true must put else on its own line: {out}"
+        );
+        assert!(
+            out.contains("else {"),
+            "else block must still be present: {out}"
+        );
+    }
+
+    #[test]
+    fn nl_brace_else_false_cuddles_when_cuddle_else_true() {
+        // With nl_brace_else=false and cuddle_else=true → `} else {` on one line.
         let config = Config {
             braces: crate::config::BraceConfig {
                 cuddle_else: true,
                 ..crate::config::BraceConfig::default()
+            },
+            newlines: crate::config::NewlineConfig {
+                nl_brace_else: false,
+                ..crate::config::NewlineConfig::default()
             },
             ..Config::default()
         };
@@ -5583,6 +5617,28 @@ mod tests {
     }
 
     #[test]
+    fn bitfield_colon_gets_space() {
+        // Bitfield `field:N` → `field : N` (space before and after colon in struct context).
+        let src = "struct S { unsigned int x:4; unsigned int y:8; };\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("x : 4") && out.contains("y : 8"),
+            "bitfield colon must have spaces on both sides:\n{out}"
+        );
+    }
+
+    #[test]
+    fn bitfield_ternary_colon_unaffected() {
+        // Ternary `:` inside a function must not be confused with a bitfield colon.
+        let src = "void f(void) { int x = cond ? 1 : 2; }\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("1 : 2") || out.contains("? 1 : 2"),
+            "ternary colon must still have spaces:\n{out}"
+        );
+    }
+
+    #[test]
     fn case_label_no_space_before_colon() {
         let src = "void f(int x) { switch (x) { case 1: break; default: break; } }\n";
         let out = fmt(src);
@@ -5649,23 +5705,22 @@ mod tests {
 
     #[test]
     fn add_braces_if_else() {
+        // Default nl_brace_else=true: else starts on its own line.
         let src = "void f() { if (x) a(); else b(); }\n";
         let out = fmt_with(src, &cfg_add_braces_if());
         assert!(out.contains("if (x) {"), "if branch missing brace:\n{out}");
-        assert!(
-            out.contains("} else {"),
-            "else branch missing brace:\n{out}"
-        );
+        assert!(out.contains("else {"), "else branch missing brace:\n{out}");
     }
 
     #[test]
     fn add_braces_else_if_chain() {
+        // Default nl_brace_else=true: else-if on its own line.
         let src = "void f() { if (a) x(); else if (b) y(); else z(); }\n";
         let out = fmt_with(src, &cfg_add_braces_if());
         // All three branches must be braced.
         assert!(out.contains("if (a) {"), "if-branch:\n{out}");
-        assert!(out.contains("} else if (b) {"), "else-if branch:\n{out}");
-        assert!(out.contains("} else {"), "else branch:\n{out}");
+        assert!(out.contains("else if (b) {"), "else-if branch:\n{out}");
+        assert!(out.contains("else {"), "else branch:\n{out}");
     }
 
     #[test]
@@ -5733,7 +5788,7 @@ mod tests {
         let out = fmt_with(src, &cfg_add_braces_if());
         // Inner if-else must both be braced.
         assert!(out.contains("if (b) {"), "inner if:\n{out}");
-        assert!(out.contains("} else {"), "inner else:\n{out}");
+        assert!(out.contains("else {"), "inner else:\n{out}");
         // Outer if wraps the entire inner if-else.
         let open_count = out.chars().filter(|&c| c == '{').count();
         // fn body + outer-if body + inner-if body + inner-else body = 4

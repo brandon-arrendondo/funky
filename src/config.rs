@@ -174,8 +174,8 @@ impl Default for BraceConfig {
     fn default() -> Self {
         Self {
             style: BraceStyle::Kr,
-            cuddle_else: true,
-            cuddle_catch: true,
+            cuddle_else: false,
+            cuddle_catch: false,
             collapse_empty_body: true,
             expand_large_initializers: true,
             fn_brace_newline: true,
@@ -334,7 +334,7 @@ impl Default for NewlineConfig {
             blank_line_after_var_decl_block: true,
             blank_line_after_open_brace: false,
             merge_line_comment: false,
-            nl_brace_else: false,
+            nl_brace_else: true,
         }
     }
 }

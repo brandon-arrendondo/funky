@@ -38,6 +38,7 @@ Funky defaults differ but can be configured to match.
 | `#endif` comment spacing | 1 space: `#endif /* GUARD_H */` | `preprocessor.endif_comment_space` | `2` — emits two spaces, matching uncrustify's `#endif  /* GUARD_H */` |
 | Newline before `else`/`else if` | `} else {` when `cuddle_else = true` | `newlines.nl_brace_else` | `true` — forces `}\nelse {` regardless of `cuddle_else`, matching uncrustify `nl_brace_else = add` |
 | Add braces to braceless `if`/`while`/`for` bodies | No braces added (bodies left as-is) | `braces.add_braces_to_if`, `braces.add_braces_to_while`, `braces.add_braces_to_for` | `true` for each — adds `{ }` to single-statement bodies, matching uncrustify `mod_full_brace_if/while/for = add`. Largest single source of diffs in the SQLite corpus (~284 of 354 files). |
+| Alignment column snapping | Columns aligned to `max_name_len + gap` (raw) | Columns snapped to next multiple of indent width (`align_on_tabstop = TRUE`) | `spacing.align_on_tabstop = true` — snaps trailing-comment and enum-`=` alignment columns to the next indent-width multiple, matching uncrustify's tabstop behavior. |
 
 ---
 
@@ -59,7 +60,7 @@ Known gaps not yet addressed.
 
 | Behavior | Funky | Uncrustify | Notes |
 |---|---|---|---|
-| Struct/union member declaration alignment | No alignment — members output at natural spacing | Aligns type, name, and initializer columns within a span (`align_var_def_span`) | Aesthetic only, no correctness impact. Affects many files where structs have trailing comments. Not yet implemented. |
+| Struct/union member declaration alignment | No alignment — members output at natural spacing | Aligns type, name, and initializer columns within a span (`align_var_def_span`) | Aesthetic only, no correctness impact. The trailing-comment alignment (`align_right_cmt_span`) combined with `align_on_tabstop = true` covers the most visible part (comment columns). True `align_var_def_span` (type+name column alignment) not yet implemented. |
 
 ---
 

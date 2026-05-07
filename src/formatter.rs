@@ -2758,12 +2758,19 @@ pub fn format<'src>(tokens: &[Token<'src>], config: &Config) -> Result<String, F
             nl,
             config.spacing.align_right_cmt_gap.max(1),
             normalize_single,
+            config.spacing.align_on_tabstop,
+            config.indent.width as usize,
         )
     } else {
         output
     };
     let output = if config.spacing.align_enum_equ_span > 0 {
-        align_enum_equals(&output, nl)
+        align_enum_equals(
+            &output,
+            nl,
+            config.spacing.align_on_tabstop,
+            config.indent.width as usize,
+        )
     } else {
         output
     };
@@ -2785,6 +2792,14 @@ fn normalize_endif_spacing(line: &str, spaces: u32) -> String {
     } else {
         line.to_string()
     }
+}
+
+/// Round `n` up to the next multiple of `step` (or `n` itself if already a multiple).
+fn round_up_to_multiple(n: usize, step: usize) -> usize {
+    if step == 0 {
+        return n;
+    }
+    n.div_ceil(step) * step
 }
 
 /// Returns the byte index of the `//` or `/*` that starts a trailing inline
@@ -2849,6 +2864,8 @@ fn align_trailing_comments(
     nl: &str,
     min_gap: usize,
     normalize_single: bool,
+    on_tabstop: bool,
+    tab_width: usize,
 ) -> String {
     let lines: Vec<&str> = output.split(nl).collect();
     let n = lines.len();
@@ -2872,12 +2889,17 @@ fn align_trailing_comments(
                 .map(|k| lines[k][..cols[k].unwrap()].trim_end().len())
                 .max()
                 .unwrap();
-            let target = max_code_len + min_gap;
+            let raw_target = max_code_len + min_gap;
+            let target = if on_tabstop && tab_width > 0 {
+                round_up_to_multiple(raw_target, tab_width)
+            } else {
+                raw_target
+            };
             for k in i..j {
                 let col = cols[k].unwrap();
                 let code = lines[k][..col].trim_end();
                 let comment = &lines[k][col..];
-                let pad = target - code.len();
+                let pad = target.max(code.len() + 1) - code.len();
                 result[k] = format!("{}{}{}", code, " ".repeat(pad), comment);
             }
             i = j;
@@ -2899,7 +2921,11 @@ fn enum_eq_col(line: &str) -> Option<usize> {
     if !trimmed.starts_with(|c: char| c.is_alphabetic() || c == '_') {
         return None;
     }
-    if !trimmed.trim_end().ends_with(',') {
+    // Enum members end with `,` (non-last) or with an alphanumeric/`_`/`)` (last
+    // member).  Reject anything that ends with `;`, `{`, `}`, etc. to avoid
+    // false-positives on declarations or initialiser lines.
+    let last = trimmed.trim_end().chars().last().unwrap_or(' ');
+    if !matches!(last, ',' | ')') && !last.is_alphanumeric() && last != '_' {
         return None;
     }
     let bytes = line.as_bytes();
@@ -2942,7 +2968,7 @@ fn is_bare_enum_member(line: &str) -> bool {
 /// Align `=` signs within groups of consecutive enum value lines.
 /// Bare enum members (no explicit value) are transparent within a group —
 /// they don't break alignment but are left unchanged themselves.
-fn align_enum_equals(output: &str, nl: &str) -> String {
+fn align_enum_equals(output: &str, nl: &str, on_tabstop: bool, tab_width: usize) -> String {
     let lines: Vec<&str> = output.split(nl).collect();
     let n = lines.len();
     let cols: Vec<Option<usize>> = lines.iter().map(|l| enum_eq_col(l)).collect();
@@ -2951,14 +2977,17 @@ fn align_enum_equals(output: &str, nl: &str) -> String {
     let mut i = 0;
     while i < n {
         if cols[i].is_some() {
-            // Extend the group through bare members and blank lines as well as `=` members.
-            // Blank lines are transparent so that enum values separated by blank lines
-            // are still aligned together (like uncrustify's pp_indent behaviour for enums).
+            // Extend the group through bare members, blank lines, and preprocessor
+            // directives (#ifdef/#endif/#else) as well as `=` members.  All of these
+            // are transparent connectors — they don't break the alignment group.
+            // This matches uncrustify's behavior of aligning enum members across
+            // conditional-compilation blocks.
             let mut j = i + 1;
             while j < n
                 && (cols[j].is_some()
                     || is_bare_enum_member(lines[j])
-                    || lines[j].trim().is_empty())
+                    || lines[j].trim().is_empty()
+                    || lines[j].trim_start().starts_with('#'))
             {
                 j += 1;
             }
@@ -2974,7 +3003,12 @@ fn align_enum_equals(output: &str, nl: &str) -> String {
                     .map(|&k| lines[k][..cols[k].unwrap()].trim_end().len())
                     .max()
                     .unwrap();
-                let target = max_name_len + 1;
+                let raw_target = max_name_len + 1;
+                let target = if on_tabstop && tab_width > 0 {
+                    round_up_to_multiple(raw_target, tab_width)
+                } else {
+                    raw_target
+                };
                 for k in eq_indices {
                     let col = cols[k].unwrap();
                     let name = lines[k][..col].trim_end();
@@ -4945,6 +4979,91 @@ mod tests {
         assert_eq!(
             positions[0], positions[1],
             "= signs not aligned across bare members:\n{out}"
+        );
+    }
+
+    #[test]
+    fn align_enum_equals_last_member_no_comma() {
+        // The last enum member has no trailing comma — it must still be included
+        // in the alignment group.
+        let src = "enum E {\n    ACCEPT_UNLESS_DENIED = 0,\n    DENY_UNLESS_ACCEPTED = 1,\n    USE_EXTERNAL_RADIUS_AUTH = 2\n};\n";
+        let out = fmt_with(src, &cfg_enum_align(1));
+        let positions: Vec<usize> = out.lines().filter_map(enum_eq_col).collect();
+        assert_eq!(positions.len(), 3, "all 3 members must be detected:\n{out}");
+        assert!(
+            positions.windows(2).all(|w| w[0] == w[1]),
+            "= signs not aligned for last-member-no-comma:\n{out}"
+        );
+    }
+
+    #[test]
+    fn align_enum_equals_ifdef_transparent() {
+        // Preprocessor directives inside an enum must not break the alignment group.
+        let src = "enum E {\n    SECURITY_PLAINTEXT = 0,\n#ifdef CONFIG_WEP\n    SECURITY_STATIC_WEP = 1,\n#endif\n    SECURITY_WPA_PSK = 3,\n};\n";
+        let out = fmt_with(src, &cfg_enum_align(1));
+        let positions: Vec<usize> = out.lines().filter_map(enum_eq_col).collect();
+        assert_eq!(positions.len(), 3, "3 assigned members expected:\n{out}");
+        assert!(
+            positions.windows(2).all(|w| w[0] == w[1]),
+            "= signs not aligned across #ifdef block:\n{out}"
+        );
+    }
+
+    #[test]
+    fn align_enum_equals_on_tabstop() {
+        use crate::config::SpacingConfig;
+        let cfg = Config {
+            spacing: SpacingConfig {
+                align_enum_equ_span: 1,
+                align_on_tabstop: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // Names are 3 and 9 chars; max+1 = 10; next 4-multiple = 12.
+        let src = "enum E {\n    FOO = 0,\n    LONGER_NAME = 1,\n};\n";
+        let out = fmt_with(src, &cfg);
+        let positions: Vec<usize> = out.lines().filter_map(enum_eq_col).collect();
+        assert_eq!(positions.len(), 2, "2 members expected:\n{out}");
+        assert!(
+            positions.windows(2).all(|w| w[0] == w[1]),
+            "= signs not aligned with tabstop:\n{out}"
+        );
+        // Column must be a multiple of indent_width (4)
+        let col = positions[0];
+        assert_eq!(
+            col % 4,
+            0,
+            "tabstop alignment: column {col} must be a multiple of 4:\n{out}"
+        );
+    }
+
+    #[test]
+    fn align_trailing_comments_on_tabstop() {
+        use crate::config::SpacingConfig;
+        let cfg = Config {
+            spacing: SpacingConfig {
+                align_right_cmt_span: 3,
+                align_right_cmt_gap: 1,
+                align_on_tabstop: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // Code lengths 22 and 26; max+gap = 27; next 4-multiple = 28.
+        let src = "    int dot11MeshRetryTimeout; /* msec */\n    int dot11MeshConfirmTimeout; /* msec */\n    int dot11MeshHoldingTimeout; /* msec */\n";
+        let out = fmt_with(src, &cfg);
+        let positions: Vec<usize> = out.lines().filter_map(trailing_comment_col).collect();
+        assert_eq!(positions.len(), 3, "3 trailing comments expected:\n{out}");
+        assert!(
+            positions.windows(2).all(|w| w[0] == w[1]),
+            "trailing comments not aligned:\n{out}"
+        );
+        let col = positions[0];
+        assert_eq!(
+            col % 4,
+            0,
+            "tabstop: column {col} must be a multiple of 4:\n{out}"
         );
     }
 

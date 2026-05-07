@@ -243,6 +243,10 @@ pub struct SpacingConfig {
     /// Align trailing `/**<` Doxygen member comments across consecutive struct
     /// member lines that all carry such a comment.  0 = disabled.
     pub align_doxygen_cmt_span: usize,
+    /// When true, snap alignment columns to the nearest multiple of the indent
+    /// width (analogous to uncrustify's `align_on_tabstop = TRUE`). Applies to
+    /// trailing-comment and enum-`=` alignment. Default false.
+    pub align_on_tabstop: bool,
 }
 
 impl Default for SpacingConfig {
@@ -262,6 +266,7 @@ impl Default for SpacingConfig {
             align_right_cmt_style: AlignCmtStyle::Groups,
             align_enum_equ_span: 1,
             align_doxygen_cmt_span: 1,
+            align_on_tabstop: false,
         }
     }
 }
@@ -384,6 +389,7 @@ align_right_cmt_gap        = 3
 align_right_cmt_style      = "all"
 align_enum_equ_span        = 1
 align_doxygen_cmt_span     = 1
+align_on_tabstop           = true
 
 [newlines]
 style           = "lf"
@@ -409,6 +415,7 @@ normalize_block_comment_closing = true
         assert!(!cfg.spacing.space_before_call_paren);
         assert_eq!(cfg.newlines.max_blank_lines, 2);
         assert!(cfg.comments.normalize_block_comment_closing);
+        assert!(cfg.spacing.align_on_tabstop);
         assert!(cfg.ignore.patterns.is_empty());
     }
 

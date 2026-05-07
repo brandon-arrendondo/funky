@@ -32,6 +32,7 @@ align_right_cmt_span       = 3        # 0: off; ≥1: column-align trailing // a
 align_right_cmt_style      = "groups" # "groups": align multi-line groups only (matches uncrustify default); "all": normalize every trailing comment to min_gap
 align_enum_equ_span        = 1        # 0: off; ≥1: align enum = signs within span
 align_doxygen_cmt_span     = 1        # 0: off; ≥1: column-align /**< member comments
+align_on_tabstop           = false    # true: snap alignment columns to next indent-width multiple (matches uncrustify align_on_tabstop=TRUE)
 
 [newlines]
 style           = "lf"   # "lf", "crlf", "native"

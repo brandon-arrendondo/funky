@@ -35,6 +35,7 @@ Funky defaults differ but can be configured to match.
 | Single trailing comment gap | 1 space | `spacing.align_right_cmt_style` | `"all"` — pads every trailing comment to `align_right_cmt_gap` spaces (though still won't exactly match arbitrary source column widths that uncrustify preserves) |
 | Space after C-style cast | No space: `(void *)ptr` | `spacing.space_after_cast` | `true` — emits a space between the closing `)` of a cast and the operand, matching uncrustify's default `(void *) ptr` |
 | `#endif` comment spacing | 1 space: `#endif /* GUARD_H */` | `preprocessor.endif_comment_space` | `2` — emits two spaces, matching uncrustify's `#endif  /* GUARD_H */` |
+| Newline before `else`/`else if` | `} else {` when `cuddle_else = true` | `newlines.nl_brace_else` | `true` — forces `}\nelse {` regardless of `cuddle_else`, matching uncrustify `nl_brace_else = add` |
 
 ---
 
@@ -54,9 +55,7 @@ Issues found during comparison that were resolved.
 
 Known gaps not yet addressed.
 
-| Behavior | Funky | Uncrustify | Notes |
-|---|---|---|---|
-| `nl_brace_else`: newline before `else` | Always emits `} else {` on one line (K&R style) | Optionally places `}` and `else {` on separate lines when `nl_brace_else = add` | Config key and rule not yet implemented. |
+*(none currently)*
 
 ---
 

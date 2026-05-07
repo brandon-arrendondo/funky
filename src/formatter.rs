@@ -692,7 +692,9 @@ impl<'src> Fmt<'src> {
         let typedef_name =
             matches!(ctx, BraceCtx::Type) && matches!(next_kind, Some(TokenKind::Ident));
         let cuddle = match next_kind {
-            Some(TokenKind::KwElse) => self.config.braces.cuddle_else,
+            Some(TokenKind::KwElse) => {
+                self.config.braces.cuddle_else && !self.config.newlines.nl_brace_else
+            }
             Some(TokenKind::KwCatch) => self.config.braces.cuddle_catch,
             Some(TokenKind::KwWhile) => matches!(ctx, BraceCtx::Block),
             _ => false,
@@ -3137,6 +3139,76 @@ mod tests {
         assert!(
             !out.contains("void f() {}"),
             "collapse_empty_body=false should not collapse: {out}"
+        );
+    }
+
+    #[test]
+    fn nl_brace_else_default_cuddles() {
+        // Default: nl_brace_else=false, cuddle_else=true → `} else {` on one line.
+        let config = Config {
+            braces: crate::config::BraceConfig {
+                cuddle_else: true,
+                ..crate::config::BraceConfig::default()
+            },
+            ..Config::default()
+        };
+        let src = "void f() { if (x) { a(); } else { b(); } }\n";
+        let out = fmt_with(src, &config);
+        assert!(
+            out.contains("} else {"),
+            "cuddle_else=true, nl_brace_else=false should cuddle: {out}"
+        );
+    }
+
+    #[test]
+    fn nl_brace_else_true_overrides_cuddle() {
+        // nl_brace_else=true forces newline before else even when cuddle_else=true.
+        let config = Config {
+            braces: crate::config::BraceConfig {
+                cuddle_else: true,
+                ..crate::config::BraceConfig::default()
+            },
+            newlines: crate::config::NewlineConfig {
+                nl_brace_else: true,
+                ..crate::config::NewlineConfig::default()
+            },
+            ..Config::default()
+        };
+        let src = "void f() { if (x) { a(); } else { b(); } }\n";
+        let out = fmt_with(src, &config);
+        assert!(
+            !out.contains("} else"),
+            "nl_brace_else=true must break before else: {out}"
+        );
+        assert!(
+            out.lines().any(|l| l.trim() == "else {"),
+            "else must start on its own line: {out}"
+        );
+    }
+
+    #[test]
+    fn nl_brace_else_true_else_if() {
+        // nl_brace_else=true also applies to `else if (`.
+        let config = Config {
+            braces: crate::config::BraceConfig {
+                cuddle_else: true,
+                ..crate::config::BraceConfig::default()
+            },
+            newlines: crate::config::NewlineConfig {
+                nl_brace_else: true,
+                ..crate::config::NewlineConfig::default()
+            },
+            ..Config::default()
+        };
+        let src = "void f() { if (x) { a(); } else if (y) { b(); } }\n";
+        let out = fmt_with(src, &config);
+        assert!(
+            !out.contains("} else if"),
+            "nl_brace_else=true must break before else if: {out}"
+        );
+        assert!(
+            out.lines().any(|l| l.trim().starts_with("else if")),
+            "else if must start on its own line: {out}"
         );
     }
 

@@ -301,6 +301,9 @@ pub struct NewlineConfig {
     /// (with no intervening blank lines), hoist it to the end of that
     /// preceding line as a trailing inline comment.
     pub merge_line_comment: bool,
+    /// When true, always emit a newline between `}` and `else`/`else if`,
+    /// overriding `braces.cuddle_else`. Matches uncrustify `nl_brace_else = add`.
+    pub nl_brace_else: bool,
 }
 
 impl Default for NewlineConfig {
@@ -312,6 +315,7 @@ impl Default for NewlineConfig {
             blank_line_after_var_decl_block: true,
             blank_line_after_open_brace: false,
             merge_line_comment: false,
+            nl_brace_else: false,
         }
     }
 }

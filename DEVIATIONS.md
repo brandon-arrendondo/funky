@@ -56,7 +56,9 @@ Issues found during comparison that were resolved.
 
 Known gaps not yet addressed.
 
-*(none currently)*
+| Behavior | Funky | Uncrustify | Notes |
+|---|---|---|---|
+| Struct/union member declaration alignment | No alignment — members output at natural spacing | Aligns type, name, and initializer columns within a span (`align_var_def_span`) | Aesthetic only, no correctness impact. Affects many files where structs have trailing comments. Not yet implemented. |
 
 ---
 

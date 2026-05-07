@@ -1715,6 +1715,8 @@ impl<'src> Fmt<'src> {
             {
                 return true;
             }
+            // `for (i = 0;; i++)` — space between consecutive `;` only when the
+            // following clause is non-empty (handled in the Semi arm directly).
             // `foo(int x, ...)` — space after comma applies before `...`.
             if next == TokenKind::DotDotDot && prev == TokenKind::Comma {
                 return self.config.spacing.space_after_comma;
@@ -2341,6 +2343,16 @@ impl<'src> Fmt<'src> {
                     self.flush_blank_lines();
                     self.pending_type = false;
                     self.pending_extern_c = false;
+                    // `for (init;; inc)` — space between consecutive semicolons, but
+                    // only when the clause after the second `;` is non-empty (i.e.
+                    // `for (;;)` infinite-loop form keeps no space; uncrustify
+                    // normalizes that form to no-space).
+                    if self.paren_depth > 0
+                        && self.prev == Some(TokenKind::Semi)
+                        && self.peek_non_ws_kind() != Some(TokenKind::RParen)
+                    {
+                        self.write(" ");
+                    }
                     self.write(";");
                     // Don't emit newline if we're inside parens (for-loop header).
                     if self.paren_depth == 0 {
@@ -4670,6 +4682,28 @@ mod tests {
         assert!(
             !out.contains(";++i") && out.contains("; ++i"),
             "semicolon before ++ must have a space: {out}"
+        );
+    }
+
+    #[test]
+    fn space_between_consecutive_semis_in_for() {
+        // for (i = 0;; i++) — empty condition clause: space added between ;;
+        let out = fmt("void f() { for (i = 0;; i++) {} }\n");
+        assert!(
+            out.contains("for (i = 0; ; i++)"),
+            "empty for-clause needs space between consecutive semicolons: {out}"
+        );
+        // for (;;) — infinite loop: no space (uncrustify normalizes to no-space)
+        let out2 = fmt("void f() { for (;;) {} }\n");
+        assert!(
+            out2.contains("for (;;)"),
+            "infinite-loop for(;;) must not get spaces: {out2}"
+        );
+        // source already had spaces: for (; ;) — normalize to for (;;)
+        let out3 = fmt("void f() { for (; ;) {} }\n");
+        assert!(
+            out3.contains("for (;;)"),
+            "for(; ;) with spaces should normalize to for(;;): {out3}"
         );
     }
 

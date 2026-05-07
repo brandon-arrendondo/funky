@@ -2300,7 +2300,9 @@ impl<'src> Fmt<'src> {
                 // ── Paren depth tracking ──────────────────────────────────────
                 TokenKind::LParen => {
                     self.flush_blank_lines();
-                    let is_cast = self.next_is_type_kw() && !self.prev_is_sizeof_like();
+                    let is_cast = self.next_is_type_kw()
+                        && !self.prev_is_sizeof_like()
+                        && !self.prev.is_some_and(|p| p.is_control_kw());
                     self.cast_paren_stack.push(is_cast);
                     if self.at_line_start {
                         self.indent();
@@ -3337,7 +3339,10 @@ mod tests {
         let src = "#ifndef GUARD_H\n#define GUARD_H\n#endif\n";
         let out = fmt(src);
         let endif_line = out.lines().find(|l| l.starts_with("#endif")).unwrap();
-        assert_eq!(endif_line, "#endif", "bare #endif must not gain trailing space: {out}");
+        assert_eq!(
+            endif_line, "#endif",
+            "bare #endif must not gain trailing space: {out}"
+        );
     }
 
     #[test]
@@ -4110,6 +4115,22 @@ mod tests {
         assert!(
             out.contains("(MyType*)val") || out.contains("(MyType *)val"),
             "user-defined pointer cast should have no space after ')': {out}"
+        );
+    }
+
+    #[test]
+    fn if_condition_ident_not_misclassified_as_cast() {
+        // `if(x) stmt` — the `(x)` must NOT be treated as a cast, so there
+        // must be a space between `)` and the body statement.
+        let src = "void f(void) { if(x) foo(); while(p) bar(); }\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("if (x) foo()"),
+            "space missing after if condition: {out}"
+        );
+        assert!(
+            out.contains("while (p) bar()"),
+            "space missing after while condition: {out}"
         );
     }
 
@@ -5080,7 +5101,10 @@ mod tests {
     fn pp_indent_enabled() {
         use crate::config::PreprocConfig;
         let cfg = Config {
-            preprocessor: PreprocConfig { pp_indent: true, ..PreprocConfig::default() },
+            preprocessor: PreprocConfig {
+                pp_indent: true,
+                ..PreprocConfig::default()
+            },
             ..Config::default()
         };
         let src =
@@ -5108,7 +5132,10 @@ mod tests {
     fn pp_indent_elif_else_at_outer_level() {
         use crate::config::PreprocConfig;
         let cfg = Config {
-            preprocessor: PreprocConfig { pp_indent: true, ..PreprocConfig::default() },
+            preprocessor: PreprocConfig {
+                pp_indent: true,
+                ..PreprocConfig::default()
+            },
             ..Config::default()
         };
         let src = "#ifdef WIN32\n#define PLATFORM \"windows\"\n#elif defined(LINUX)\n#define PLATFORM \"linux\"\n#else\n#define PLATFORM \"unknown\"\n#endif\n";

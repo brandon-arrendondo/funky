@@ -1957,7 +1957,14 @@ impl<'src> Fmt<'src> {
                         .replace('\n', nl);
                     // Ensure the closing `*/` has a leading space when it sits
                     // flush at the start of a line (e.g. `\n*/` → `\n */`).
-                    let normalized = if normalized.contains(&format!("{nl}*/")) {
+                    // Exception: SQLite-style `**`-continuation comments already
+                    // have `*/` at column 0 — don't add a spurious space there.
+                    let uses_double_star = normalized
+                        .split(nl)
+                        .skip(1)
+                        .any(|line| line.starts_with("**"));
+                    let normalized = if !uses_double_star && normalized.contains(&format!("{nl}*/"))
+                    {
                         normalized.replace(&format!("{nl}*/"), &format!("{nl} */"))
                     } else {
                         normalized
@@ -4544,6 +4551,21 @@ mod tests {
         assert!(
             out.contains("/* comment */ +"),
             "binary op after inline block comment must have a leading space, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn block_comment_double_star_style_closing_no_space() {
+        // SQLite-style: `/*\n** text\n*/` — closing `*/` must NOT get a leading space.
+        let src = "/*\n** SQLite style\n** continuation\n*/\nvoid f() {}\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("\n*/"),
+            "double-star style closing */ must stay flush at col 0, got:\n{out}"
+        );
+        assert!(
+            !out.contains("\n */"),
+            "double-star style must not gain a spurious leading space, got:\n{out}"
         );
     }
 

@@ -38,6 +38,40 @@ fn inj_peek_non_ws(tokens: &[Token<'_>], from: usize) -> usize {
     j
 }
 
+/// Like `inj_peek_non_ws` but also skips block/line comments, so a `/* note */ {`
+/// pattern is correctly recognized as an already-braced body.
+fn inj_peek_non_ws_or_cmt(tokens: &[Token<'_>], from: usize) -> usize {
+    let mut j = from;
+    while j < tokens.len()
+        && matches!(
+            tokens[j].kind,
+            TokenKind::Whitespace
+                | TokenKind::Newline
+                | TokenKind::CommentBlock
+                | TokenKind::CommentLine
+        )
+    {
+        j += 1;
+    }
+    j
+}
+
+/// Like `inj_copy_ws` but also copies block/line comments verbatim.
+fn inj_copy_ws_or_cmt<'src>(tokens: &[Token<'src>], i: &mut usize, out: &mut Vec<Token<'src>>) {
+    while *i < tokens.len()
+        && matches!(
+            tokens[*i].kind,
+            TokenKind::Whitespace
+                | TokenKind::Newline
+                | TokenKind::CommentBlock
+                | TokenKind::CommentLine
+        )
+    {
+        out.push(tokens[*i].clone());
+        *i += 1;
+    }
+}
+
 /// Copy a balanced `(…)` group.  `tokens[*i]` must be `(`.
 fn inj_copy_paren<'src>(tokens: &[Token<'src>], i: &mut usize, out: &mut Vec<Token<'src>>) {
     out.push(tokens[*i].clone());
@@ -134,10 +168,11 @@ fn inj_handle_if<'src>(
     if *i < tokens.len() && tokens[*i].kind == TokenKind::LParen {
         inj_copy_paren(tokens, i, out);
     }
-    let j = inj_peek_non_ws(tokens, *i);
+    let j = inj_peek_non_ws_or_cmt(tokens, *i);
     if j < tokens.len() && tokens[j].kind == TokenKind::LBrace {
         // Already braced — still recurse inside so nested bodies are also handled.
-        inj_copy_ws(tokens, i, out);
+        // Use comment-aware copy so trailing comments before `{` are preserved.
+        inj_copy_ws_or_cmt(tokens, i, out);
         inj_copy_block(tokens, i, out, config);
     } else if j >= tokens.len() || tokens[j].kind == TokenKind::Semi {
         // Degenerate `if (cond);` — copy as-is.
@@ -200,11 +235,11 @@ fn inj_handle_ctrl<'src>(
     if *i < tokens.len() && tokens[*i].kind == TokenKind::LParen {
         inj_copy_paren(tokens, i, out);
     }
-    let j = inj_peek_non_ws(tokens, *i);
+    let j = inj_peek_non_ws_or_cmt(tokens, *i);
     if j >= tokens.len() || tokens[j].kind == TokenKind::LBrace || tokens[j].kind == TokenKind::Semi
     {
         // Already braced, or `;` (do-while terminator / empty loop) — copy as-is.
-        inj_copy_ws(tokens, i, out);
+        inj_copy_ws_or_cmt(tokens, i, out);
         if *i < tokens.len() {
             inj_item(tokens, i, out, config);
         }
@@ -3409,13 +3444,17 @@ mod tests {
     }
 
     #[test]
-    fn endif_comment_space_default_normalizes_to_2() {
-        // Default endif_comment_space = 2 (matches uncrustify): normalized to double space.
-        let src = "#ifndef GUARD_H\n#define GUARD_H\n#endif /* GUARD_H */\n";
+    fn endif_comment_space_default_normalizes_to_1() {
+        // Default endif_comment_space = 1: preserves single space (matches uncrustify on .c files).
+        let src = "#endif  /* GUARD_H */\n";
         let out = fmt(src);
         assert!(
-            out.contains("#endif  /* GUARD_H */"),
-            "expected double space before comment with default config: {out}"
+            out.contains("#endif /* GUARD_H */"),
+            "expected single space before comment with default config: {out}"
+        );
+        assert!(
+            !out.contains("#endif  "),
+            "double space must not appear with default config: {out}"
         );
     }
 
@@ -4131,21 +4170,22 @@ mod tests {
 
     #[test]
     fn void_cast_statement_indented() {
-        // (void)expr; at block scope must keep indentation and must not gain a
-        // spurious space after the cast when space_after_cast = false (default).
-        // fn_brace_newline=true (default) puts the function { on its own line.
+        // (void)expr; must keep indentation; with space_after_cast=true (default) a
+        // space is added: `(void) func()`. fn_brace_newline=true puts the function { on its own line.
         let src = "void f() {\n    (void)func();\n    (void)bar(1, 2);\n}\n";
         let out = fmt(src);
         assert_eq!(
             out,
-            "void f()\n{\n    (void)func();\n    (void)bar(1, 2);\n}\n"
+            "void f()\n{\n    (void) func();\n    (void) bar(1, 2);\n}\n"
         );
     }
 
     #[test]
     fn cast_space_after_cast_false() {
+        let mut cfg = Config::default();
+        cfg.spacing.space_after_cast = false;
         let src = "void f() { int x = (int)3.14; }\n";
-        let out = fmt(src);
+        let out = fmt_with(src, &cfg);
         assert!(
             out.contains("(int)3.14"),
             "space_after_cast=false should produce no space: {out}"
@@ -4154,12 +4194,15 @@ mod tests {
 
     #[test]
     fn cast_double_cast_no_space() {
-        // Chained casts: (double)(int)x — no space between the two parens (default).
+        // Chained casts: (double)(int)x — no space between the two parens regardless of
+        // space_after_cast, because the inner `(int)x` is itself a cast expression.
+        let mut cfg = Config::default();
+        cfg.spacing.space_after_cast = false;
         let src = "void f() { double d = (double)(int)x; }\n";
-        let out = fmt(src);
+        let out = fmt_with(src, &cfg);
         assert!(
             out.contains("(double)(int)x"),
-            "double cast should have no space between: {out}"
+            "double cast should have no space between with space_after_cast=false: {out}"
         );
     }
 
@@ -4183,9 +4226,11 @@ mod tests {
 
     #[test]
     fn cast_user_defined_type_no_space() {
-        // (MyType) val — user-defined type cast must honor space_after_cast=false.
+        // (MyType) val — user-defined type cast honors space_after_cast=false.
+        let mut cfg = Config::default();
+        cfg.spacing.space_after_cast = false;
         let src = "void f() { MyType x = (MyType) val; }\n";
-        let out = fmt(src);
+        let out = fmt_with(src, &cfg);
         assert!(
             out.contains("(MyType)val"),
             "user-defined type cast should have no space: {out}"
@@ -4194,9 +4239,11 @@ mod tests {
 
     #[test]
     fn cast_followed_by_dereference_no_space() {
-        // (type)*ptr — cast + dereference must not gain a space (space_after_cast=false).
+        // (type)*ptr — cast + dereference: space_after_cast does not insert space before `*`.
+        let mut cfg = Config::default();
+        cfg.spacing.space_after_cast = false;
         let src = "void f() { uint32_t x = (uint32_t)*ptr; int y = (int)*p; }\n";
-        let out = fmt(src);
+        let out = fmt_with(src, &cfg);
         assert!(out.contains("(uint32_t)*ptr"), "cast+deref uint32_t: {out}");
         assert!(out.contains("(int)*p"), "cast+deref int: {out}");
     }
@@ -4223,9 +4270,11 @@ mod tests {
 
     #[test]
     fn cast_user_defined_pointer_no_space() {
-        // (MyType *) val — pointer cast with user-defined type.
+        // (MyType *) val — pointer cast with space_after_cast=false.
+        let mut cfg = Config::default();
+        cfg.spacing.space_after_cast = false;
         let src = "void f() { MyType *x = (MyType *) val; }\n";
-        let out = fmt(src);
+        let out = fmt_with(src, &cfg);
         assert!(
             out.contains("(MyType*)val") || out.contains("(MyType *)val"),
             "user-defined pointer cast should have no space after ')': {out}"
@@ -4234,18 +4283,22 @@ mod tests {
 
     #[test]
     fn if_condition_ident_not_misclassified_as_cast() {
-        // `if(x) stmt` — the `(x)` must NOT be treated as a cast, so there
-        // must be a space between `)` and the body statement.
+        // `if(x) stmt` — the `(x)` must NOT be treated as a cast.
+        // With add_braces_to_if=true (default), bodies get wrapped; check that the
+        // condition still gets proper space after `)`.
         let src = "void f(void) { if(x) foo(); while(p) bar(); }\n";
         let out = fmt(src);
         assert!(
-            out.contains("if (x) foo()"),
+            out.contains("if (x)"),
             "space missing after if condition: {out}"
         );
         assert!(
-            out.contains("while (p) bar()"),
+            out.contains("while (p)"),
             "space missing after while condition: {out}"
         );
+        // Verify foo() and bar() appear somewhere (they're now inside braces).
+        assert!(out.contains("foo()"), "foo() missing: {out}");
+        assert!(out.contains("bar()"), "bar() missing: {out}");
     }
 
     #[test]
@@ -5555,10 +5608,11 @@ mod tests {
     #[test]
     fn space_after_comma_not_eaten_by_cast_pointer() {
         // Same leak pattern with an explicit cast `(unsigned char *)buf`.
+        // With space_after_cast=true (default) a space appears: `(unsigned char *) buf`.
         let src = "void f(void) {\n    fn(ctx, (unsigned char *)buf, (unsigned int)len);\n}\n";
         let out = fmt(src);
         assert!(
-            out.contains("(unsigned char *)buf, (unsigned int)len"),
+            out.contains("(unsigned char *) buf, (unsigned int) len"),
             "space after comma following a cast must not be suppressed: {out}"
         );
     }

@@ -34,7 +34,7 @@ impl Default for PreprocConfig {
     fn default() -> Self {
         Self {
             pp_indent: false,
-            endif_comment_space: 2,
+            endif_comment_space: 1,
         }
     }
 }
@@ -180,9 +180,9 @@ impl Default for BraceConfig {
             expand_large_initializers: true,
             fn_brace_newline: true,
             extern_c_brace: ExternCBrace::ForceSameLine,
-            add_braces_to_if: false,
-            add_braces_to_while: false,
-            add_braces_to_for: false,
+            add_braces_to_if: true,
+            add_braces_to_while: true,
+            add_braces_to_for: true,
         }
     }
 }
@@ -258,7 +258,7 @@ impl Default for SpacingConfig {
             space_around_binary_ops: true,
             space_inside_parens: false,
             space_inside_brackets: false,
-            space_after_cast: false,
+            space_after_cast: true,
             pointer_align: PointerAlign::Name,
             space_inside_angle_brackets: false,
             align_right_cmt_span: 3,

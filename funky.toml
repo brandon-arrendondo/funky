@@ -14,9 +14,9 @@ cuddle_catch        = false  # false: } \n catch (matches uncrustify); true: } c
 collapse_empty_body = true
 fn_brace_newline    = true   # true: function-def { on its own line; false: follow style
 extern_c_brace      = "force_same_line"  # "force_same_line" (Google/LLVM) or "preserve" (match uncrustify default)
-add_braces_to_if    = false  # add { } around braceless if bodies (uncrustify mod_full_brace_if = add)
-add_braces_to_while = false  # add { } around braceless while bodies (mod_full_brace_while = add)
-add_braces_to_for   = false  # add { } around braceless for bodies (mod_full_brace_for = add)
+add_braces_to_if    = true   # add { } around braceless if bodies (uncrustify mod_full_brace_if = add)
+add_braces_to_while = true   # add { } around braceless while bodies (mod_full_brace_while = add)
+add_braces_to_for   = true   # add { } around braceless for bodies (mod_full_brace_for = add)
 
 [spacing]
 space_before_call_paren    = false  # foo(  vs  foo (
@@ -25,7 +25,7 @@ space_after_comma          = true
 space_around_binary_ops    = true
 space_inside_parens        = false
 space_inside_brackets      = false
-space_after_cast           = false
+space_after_cast           = true
 pointer_align              = "name"    # "type" (int* p), "name" (int *p), "middle" (int * p)
 space_inside_angle_brackets = false    # false: vector<int>   true: vector< int >
 align_right_cmt_span       = 3        # 0: off; ≥1: column-align trailing // and /* comments
@@ -45,7 +45,7 @@ nl_brace_else                   = true   # true: newline before else/else-if (ma
 
 [preprocessor]
 pp_indent             = false  # indent #include/#define/nested #if relative to #if nesting depth (uncrustify pp_indent = add)
-endif_comment_space   = 2     # spaces between `#endif` and a trailing /* comment */ (uncrustify default); set to 1 for tighter style
+endif_comment_space   = 1     # spaces between `#endif` and a trailing /* comment */; set to 2 to match uncrustify on header-guard files
 
 [comments]
 normalize_block_comment_closing = false  # false: preserve bare */ (uncrustify default); true: rewrite to ` */` to match ` *` continuation style

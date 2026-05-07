@@ -417,10 +417,17 @@ struct Fmt<'src> {
     /// Stack parallel to paren_depth: the column to align continuation lines
     /// to (i.e. the column right after the `(` was written).
     paren_col_stack: Vec<usize>,
-    /// Parallel to paren_col_stack: true when the `(` was the last
-    /// non-whitespace on its line, meaning continuations use a regular indent
-    /// instead of column alignment.
-    paren_eol_stack: Vec<bool>,
+    /// Parallel to paren_col_stack: when the `(` was the last non-whitespace
+    /// on its line, stores `(true, col)` where `col` is the precomputed column
+    /// that all continuation lines should start at.  `(false, 0)` means the
+    /// `(` was not at EOL and column-alignment is used instead.
+    paren_eol_stack: Vec<(bool, usize)>,
+    /// Indentation column of the first non-whitespace token on the current
+    /// line (set at the end of every `indent()` call, reset to 0 by `nl()`).
+    line_indent_col: usize,
+    /// Value of `paren_depth` at the time `indent()` was last called — used
+    /// to count how many `(`s were opened on the current line.
+    line_start_paren_depth: u32,
     /// Column to align continuation lines to after an `=` assignment operator.
     /// None when not inside an assignment RHS at statement level.
     assign_col: Option<usize>,
@@ -482,6 +489,8 @@ impl<'src> Fmt<'src> {
             current_col: 0,
             paren_col_stack: Vec::new(),
             paren_eol_stack: Vec::new(),
+            line_indent_col: 0,
+            line_start_paren_depth: 0,
             assign_col: None,
             assign_eol: false,
             in_var_decl_block: false,
@@ -561,43 +570,44 @@ impl<'src> Fmt<'src> {
         self.at_line_start = true;
         self.suppress_next_space = false;
         self.current_col = 0;
+        self.line_indent_col = 0;
     }
 
     fn indent(&mut self) {
+        self.line_start_paren_depth = self.paren_depth;
         if self.paren_depth > 0 {
             self.align_to_paren();
-            return;
-        }
-        if self.assign_col.is_some() {
+        } else if self.assign_col.is_some() {
             self.align_to_assign();
-            return;
+        } else {
+            let unit = self.config.indent_str();
+            for _ in 0..self.indent_level {
+                self.output.push_str(&unit);
+                self.current_col += unit.len();
+            }
+            if self.indent_level > 0 {
+                self.at_line_start = false;
+            }
         }
-        let unit = self.config.indent_str();
-        for _ in 0..self.indent_level {
-            self.output.push_str(&unit);
-            self.current_col += unit.len();
-        }
-        if self.indent_level > 0 {
-            self.at_line_start = false;
-        }
+        self.line_indent_col = self.current_col;
     }
 
     fn align_to_paren(&mut self) {
         // When `(` was the last non-whitespace before the newline, aligning to
-        // its column would push continuation far right. Use a normal indent
-        // (one level deeper than the current scope) instead.  We detect this
-        // lazily on the first continuation line and record it in paren_eol_stack
-        // so all subsequent lines in the same paren level behave consistently.
-        if let Some(eol) = self.paren_eol_stack.last_mut() {
+        // its column would push continuation far right.  Instead we use the
+        // precomputed `eol_col` stored in `paren_eol_stack`: that column is
+        // `line_indent_col + parens_opened_on_that_line * indent_width`, which
+        // matches uncrustify's behaviour for both simple and nested call sites.
+        if let Some((eol, eol_col)) = self.paren_eol_stack.last_mut() {
             if !*eol && self.output.trim_end().ends_with('(') {
                 *eol = true;
             }
             if *eol {
-                let unit = self.config.indent_str();
-                for _ in 0..=self.indent_level {
-                    self.output.push_str(&unit);
-                    self.current_col += unit.len();
+                let col = *eol_col;
+                for _ in 0..col {
+                    self.output.push(' ');
                 }
+                self.current_col = col;
                 self.at_line_start = false;
                 return;
             }
@@ -2452,7 +2462,13 @@ impl<'src> Fmt<'src> {
                     // align with it rather than with the bare `(`.
                     let extra = usize::from(self.config.spacing.space_inside_parens);
                     self.paren_col_stack.push(self.current_col + extra);
-                    self.paren_eol_stack.push(false);
+                    // Precompute the EOL continuation column: base indent of
+                    // this line plus one indent width per paren opened on it.
+                    let indent_width = self.config.indent.width as usize;
+                    let parens_on_line =
+                        (self.paren_depth - self.line_start_paren_depth) as usize;
+                    let eol_col = self.line_indent_col + parens_on_line * indent_width;
+                    self.paren_eol_stack.push((false, eol_col));
                     self.set_prev(TokenKind::LParen);
                 }
                 TokenKind::RParen => {
@@ -4751,6 +4767,36 @@ mod tests {
             indents.iter().all(|&i| i == indents[0]),
             "all continuation lines must have same indent, got:\n{out}"
         );
+    }
+
+    #[test]
+    fn paren_eol_continuation_inside_nested_call_with_assign() {
+        // `method = eap_server_get_type(` — EOL paren on an assign-continuation
+        // line (visual indent level 4 = 16 spaces).  Continuation args must
+        // be one indent deeper (20 spaces), not at the scope level (12-16).
+        // Mirrors the hostap pattern: indent_level=3 but visual indent=16.
+        let src = "void f() { void g() { void h() { x =\nget_type(\narg1,\narg2); } } }\n";
+        let out = fmt(src);
+        let arg_lines: Vec<&str> = out.lines().filter(|l| l.contains("arg")).collect();
+        assert_eq!(arg_lines.len(), 2, "expected 2 arg lines, got:\n{out}");
+        // get_type( is at indent+1 = 16 spaces; args must be at 16+4 = 20.
+        let indent = arg_lines[0].len() - arg_lines[0].trim_start().len();
+        assert_eq!(indent, 20, "args after assign-continuation EOL paren must be at 20 spaces, got:\n{out}");
+    }
+
+    #[test]
+    fn paren_eol_continuation_inner_paren_inside_if() {
+        // `if (hostapd_config_read_radius_addr(` — two parens opened on the
+        // same line (the `if (` and the call `(`).  The EOL paren is the
+        // inner call's `(`.  Continuation must be at
+        //   line_indent (8) + 2 parens * 4 = 16 spaces.
+        let src = "void f() { void g() { if (some_long_call(\narg1,\narg2)) {} } }\n";
+        let out = fmt(src);
+        let arg_lines: Vec<&str> = out.lines().filter(|l| l.contains("arg")).collect();
+        assert_eq!(arg_lines.len(), 2, "expected 2 arg lines, got:\n{out}");
+        // if ( is at level 2 = 8 spaces; 2 parens opened → 8 + 2*4 = 16.
+        let indent = arg_lines[0].len() - arg_lines[0].trim_start().len();
+        assert_eq!(indent, 16, "args inside if(call( EOL paren must be at 16 spaces, got:\n{out}");
     }
 
     #[test]

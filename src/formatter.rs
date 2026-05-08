@@ -2038,6 +2038,15 @@ impl<'src> Fmt<'src> {
                         normalized
                     };
 
+                    // Apply space_after_comma to #define bodies.
+                    let normalized = if self.config.spacing.space_after_comma
+                        && directive == "define"
+                    {
+                        add_space_after_comma(&normalized)
+                    } else {
+                        normalized
+                    };
+
                     if self.config.preprocessor.pp_indent {
                         // #endif and #elif/#else dedent before emit.
                         if is_close || is_reopen {
@@ -3083,6 +3092,98 @@ pub fn format<'src>(tokens: &[Token<'src>], config: &Config) -> Result<String, F
 
 /// Normalizes the whitespace between `#endif` and a trailing `/*` comment to
 /// exactly `spaces` spaces. Lines with no `/*` are returned unchanged.
+
+/// Scan `s` and insert a space after every `,` that is not already followed
+/// by whitespace and is not inside a string/char literal or comment.
+fn add_space_after_comma(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            // String literal — copy verbatim.
+            '"' => {
+                out.push('"');
+                loop {
+                    match chars.next() {
+                        None => break,
+                        Some('\\') => {
+                            out.push('\\');
+                            if let Some(esc) = chars.next() {
+                                out.push(esc);
+                            }
+                        }
+                        Some('"') => {
+                            out.push('"');
+                            break;
+                        }
+                        Some(ch) => out.push(ch),
+                    }
+                }
+            }
+            // Char literal — copy verbatim.
+            '\'' => {
+                out.push('\'');
+                loop {
+                    match chars.next() {
+                        None => break,
+                        Some('\\') => {
+                            out.push('\\');
+                            if let Some(esc) = chars.next() {
+                                out.push(esc);
+                            }
+                        }
+                        Some('\'') => {
+                            out.push('\'');
+                            break;
+                        }
+                        Some(ch) => out.push(ch),
+                    }
+                }
+            }
+            '/' => {
+                out.push('/');
+                match chars.peek() {
+                    // Block comment — copy verbatim.
+                    Some('*') => {
+                        out.push('*');
+                        chars.next();
+                        let mut prev = ' ';
+                        loop {
+                            match chars.next() {
+                                None => break,
+                                Some(ch) => {
+                                    if prev == '*' && ch == '/' {
+                                        out.push(ch);
+                                        break;
+                                    }
+                                    out.push(ch);
+                                    prev = ch;
+                                }
+                            }
+                        }
+                    }
+                    // Line comment — copy rest of string verbatim.
+                    Some('/') => {
+                        for ch in chars.by_ref() {
+                            out.push(ch);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            ',' => {
+                out.push(',');
+                // Insert a space unless next char is already whitespace.
+                if !matches!(chars.peek(), None | Some(' ') | Some('\t') | Some('\n') | Some('\r')) {
+                    out.push(' ');
+                }
+            }
+            ch => out.push(ch),
+        }
+    }
+    out
+}
+
 /// Apply `space_around_binary_ops` formatting to the condition part of a
 /// `#if` or `#elif` directive line.  The input `line` is the full directive
 /// (starting with `#`, ending with the newline string `nl`).  Returns the
@@ -4059,6 +4160,39 @@ mod tests {
         assert!(
             out.contains("#ifdef NDEBUG"),
             "ifdef unexpectedly reformatted: got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn preproc_define_space_after_comma() {
+        // Commas inside #define macro bodies should get a space after them.
+        let src = "# define wsdHooksInit \\\n  BenignMallocHooks *x = &GLOBAL(BenignMallocHooks,sqlite3Hooks)\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("GLOBAL(BenignMallocHooks, sqlite3Hooks)"),
+            "space_after_comma not applied in #define body:\n{out}"
+        );
+    }
+
+    #[test]
+    fn preproc_define_space_after_comma_already_present() {
+        // Should not double-space when the comma already has a space after it.
+        let src = "#define FOO(a, b) (a + b)\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("FOO(a, b)"),
+            "double-spaced comma in #define:\n{out}"
+        );
+    }
+
+    #[test]
+    fn preproc_define_comma_in_string_unchanged() {
+        // Commas inside string literals within a #define must not be touched.
+        let src = "#define MSG \"hello,world\"\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("\"hello,world\""),
+            "comma in string literal was modified:\n{out}"
         );
     }
 

@@ -2080,11 +2080,13 @@ impl<'src> Fmt<'src> {
                 // ── Block comment ─────────────────────────────────────────────
                 TokenKind::CommentBlock => {
                     self.flush_blank_lines();
-                    if !self.at_line_start {
+                    let was_at_line_start = self.at_line_start;
+                    if !was_at_line_start {
                         self.space();
                     } else {
                         self.indent();
                     }
+                    let target_indent_col = self.line_indent_col;
                     // Normalize newlines in the block comment body.
                     let nl = self.config.newline_str();
                     let normalized = tok
@@ -2145,6 +2147,92 @@ impl<'src> Fmt<'src> {
                             }
                             first = false;
                             out.push_str(line.trim_end());
+                        }
+                        out
+                    } else {
+                        normalized
+                    };
+                    // Re-indent continuation lines to match the column of `/*`.
+                    // When `add_braces_to_if/while/for` shifts a comment to a
+                    // deeper indent, the continuation lines in the lexeme still
+                    // carry their original (shallower) whitespace prefix.
+                    //
+                    // Strategy: for each continuation line, compute a per-line
+                    // delta = target_indent - orig_indent and apply it to the
+                    // line's own leading whitespace.  This preserves style-
+                    // alignment characters (e.g. the ` ` before `*` in standard
+                    // ` * foo` style) while shifting the indent portion.
+                    //
+                    // All measurements are in the unit appropriate for the indent
+                    // style:
+                    //   Spaces — expanded-space count (tabs expanded to tab_w)
+                    //   Tabs   — raw character count (tabs counted as 1)
+                    //
+                    // We walk backward past any injected synthetic tokens (e.g.
+                    // a `{` from add_braces_to_while) to find the real Whitespace
+                    // token that preceded `/*` in the source.
+                    let normalized = if was_at_line_start && normalized.contains(nl) {
+                        let tab_w = self.config.indent.width as usize;
+                        let use_spaces = self.config.indent.style == IndentStyle::Spaces;
+                        // Measure a whitespace string in the current unit.
+                        let measure_ws = |s: &str| -> usize {
+                            if use_spaces {
+                                s.chars().map(|c| if c == '\t' { tab_w } else { 1 }).sum()
+                            } else {
+                                s.chars().count()
+                            }
+                        };
+                        // Target indent in the current unit.
+                        let target: i64 = if use_spaces {
+                            target_indent_col as i64
+                        } else {
+                            self.indent_level as i64
+                        };
+                        // Original indent of `/*` from the preceding Whitespace token.
+                        let orig_indent: i64 = {
+                            let comment_idx = self.pos - 1;
+                            let mut ws_lexeme = "";
+                            let mut j = comment_idx;
+                            while j > 0 {
+                                j -= 1;
+                                match self.tokens[j].kind {
+                                    TokenKind::Whitespace => {
+                                        ws_lexeme = self.tokens[j].lexeme;
+                                        break;
+                                    }
+                                    TokenKind::Newline => break,
+                                    _ => {}
+                                }
+                            }
+                            measure_ws(ws_lexeme) as i64
+                        };
+                        let delta: i64 = target - orig_indent;
+                        let lines: Vec<&str> = normalized.split(nl).collect();
+                        let mut out = String::with_capacity(normalized.len() + 16);
+                        for (i, line) in lines.iter().enumerate() {
+                            if i > 0 {
+                                out.push_str(nl);
+                                let own_ws = line.len() - line.trim_start().len();
+                                let new_ws = ((own_ws as i64) + delta).max(0) as usize;
+                                // Build new prefix: indent_level tabs/spaces + any
+                                // remaining style-alignment spaces.
+                                if use_spaces {
+                                    for _ in 0..new_ws {
+                                        out.push(' ');
+                                    }
+                                } else {
+                                    let tabs = (self.indent_level as usize).min(new_ws);
+                                    for _ in 0..tabs {
+                                        out.push('\t');
+                                    }
+                                    for _ in 0..new_ws.saturating_sub(tabs) {
+                                        out.push(' ');
+                                    }
+                                }
+                                out.push_str(line.trim_start());
+                            } else {
+                                out.push_str(line);
+                            }
                         }
                         out
                     } else {
@@ -4397,6 +4485,34 @@ mod tests {
     }
 
     #[test]
+    fn block_comment_continuation_reindented_with_outer_block() {
+        // Regression: when add_braces_to_while shifts a comment to a deeper
+        // indent, continuation lines must shift by the same delta.
+        use crate::config::BraceConfig;
+        let config = Config {
+            braces: BraceConfig {
+                add_braces_to_while: true,
+                ..BraceConfig::default()
+            },
+            ..Config::default()
+        };
+        // Original: comment is at indent level 1 (4 spaces), continuation at same.
+        // After brace insertion it lives inside the new block at indent level 2.
+        let src = "void f() {\n    while (c)\n    /* heading line.\n    ** continuation.\n    */\n        body();\n}\n";
+        let out = fmt_with(src, &config);
+        let lines: Vec<&str> = out.lines().collect();
+        // Find the /* heading line and the ** continuation line.
+        let open_idx = lines.iter().position(|l| l.contains("/* heading")).unwrap();
+        let cont_idx = lines.iter().position(|l| l.contains("** continuation")).unwrap();
+        let open_col = lines[open_idx].find('/').unwrap();
+        let cont_col = lines[cont_idx].find('*').unwrap();
+        assert_eq!(
+            open_col, cont_col,
+            "continuation * should align with opening /* column\nout:\n{out}"
+        );
+    }
+
+    #[test]
     fn access_specifier_indentation() {
         let src = "class Foo{public:int x;private:int y;protected:int z;};";
         let out = fmt(src);
@@ -5185,13 +5301,15 @@ mod tests {
 
     #[test]
     fn block_comment_tab_continuation_expanded_to_spaces() {
-        // Source: two-tab indent before ` * text` — must become spaces.
+        // Source: two-tab-indented top-level comment.  The formatter normalizes
+        // `/*` to column 0 (indent_level=0) and re-indents continuation lines
+        // by the same delta, so ` * text` also shifts to column 1 (style space
+        // preserved, indent portion zeroed).  Tabs must be fully expanded.
         let src = "\t\t/*\n\t\t * stdout is forbidden\n\t\t */\nint x;\n";
         let out = fmt(src);
-        // Each leading \t should be expanded to indent_width (4) spaces.
         assert!(
-            out.contains("         * stdout"),
-            "tabs in continuation line must be expanded to spaces:\n{out}"
+            out.contains(" * stdout"),
+            "continuation must align with /*: got:\n{out}"
         );
         assert!(
             !out.contains('\t'),

@@ -3614,6 +3614,15 @@ fn enum_eq_col(line: &str) -> Option<usize> {
     None
 }
 
+/// True when `line` is a comment-only line that should not break an enum
+/// alignment group.  Matches single-line `//` comments and single-line
+/// `/* ... */` block comments (including `/** ... */` doc comments).
+fn is_enum_comment_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("//")
+        || (trimmed.starts_with("/*") && trimmed.trim_end().ends_with("*/"))
+}
+
 /// True when `line` looks like a bare enum member with no explicit value
 /// (e.g. `    RED,` or `    RED, // comment`).  Used to let bare members
 /// act as transparent connectors within an alignment group so that
@@ -3652,7 +3661,8 @@ fn align_enum_equals(output: &str, nl: &str, on_tabstop: bool, tab_width: usize)
                 && (cols[j].is_some()
                     || is_bare_enum_member(lines[j])
                     || lines[j].trim().is_empty()
-                    || lines[j].trim_start().starts_with('#'))
+                    || lines[j].trim_start().starts_with('#')
+                    || is_enum_comment_line(lines[j]))
             {
                 j += 1;
             }
@@ -6037,6 +6047,51 @@ mod tests {
         assert!(
             positions.windows(2).all(|w| w[0] == w[1]),
             "= signs not aligned across #ifdef block:\n{out}"
+        );
+    }
+
+    #[test]
+    fn align_enum_equals_doc_comments_transparent() {
+        // Doc comments preceding each enum value must not break the alignment group.
+        // Mirrors the error_codes.h pattern where every member has a /** ... */ comment.
+        let src = concat!(
+            "typedef enum {\n",
+            "    /** Successful result */\n",
+            "    RESULT_SUCCESS = 0,\n",
+            "\n",
+            "    /** Invalid arguments */\n",
+            "    RESULT_INVALID_ARGS = 1,\n",
+            "\n",
+            "    /** Not enough room to write */\n",
+            "    RESULT_NOT_ENOUGH_ROOM_TO_WRITE = 7,\n",
+            "} result_e;\n",
+        );
+        let out = fmt_with(src, &cfg_enum_align(1));
+        let positions: Vec<usize> = out.lines().filter_map(enum_eq_col).collect();
+        assert_eq!(positions.len(), 3, "3 assigned members expected:\n{out}");
+        assert!(
+            positions.windows(2).all(|w| w[0] == w[1]),
+            "= signs not aligned across doc comments:\n{out}"
+        );
+    }
+
+    #[test]
+    fn align_enum_equals_line_comments_transparent() {
+        // Line comments (//) between enum values must not break the alignment group.
+        let src = concat!(
+            "typedef enum {\n",
+            "    // first\n",
+            "    A = 0,\n",
+            "    // second\n",
+            "    LONG_NAME = 1,\n",
+            "} E;\n",
+        );
+        let out = fmt_with(src, &cfg_enum_align(1));
+        let positions: Vec<usize> = out.lines().filter_map(enum_eq_col).collect();
+        assert_eq!(positions.len(), 2, "2 assigned members expected:\n{out}");
+        assert_eq!(
+            positions[0], positions[1],
+            "= signs not aligned across line comments:\n{out}"
         );
     }
 

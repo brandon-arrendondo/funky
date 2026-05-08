@@ -1111,7 +1111,7 @@ impl<'src> Fmt<'src> {
     fn prev_through_comments(&self) -> Option<TokenKind> {
         if !matches!(
             self.prev,
-            Some(TokenKind::CommentBlock | TokenKind::CommentLine)
+            Some(TokenKind::CommentBlock | TokenKind::CommentLine | TokenKind::PreprocLine)
         ) {
             return self.prev;
         }
@@ -1125,7 +1125,8 @@ impl<'src> Fmt<'src> {
                 TokenKind::Whitespace
                 | TokenKind::Newline
                 | TokenKind::CommentBlock
-                | TokenKind::CommentLine => {
+                | TokenKind::CommentLine
+                | TokenKind::PreprocLine => {
                     if i == 0 {
                         return None;
                     }
@@ -5957,6 +5958,33 @@ mod tests {
         assert!(
             out.contains("            x = 1;"),
             "#ifdef/#else depth: code after #endif must be at depth 3 (12 spaces): {out}"
+        );
+    }
+
+    #[test]
+    fn else_brace_after_ifdef_block() {
+        // A `{` following `else` with a #ifdef directive in between must be treated
+        // as a Block brace (not an initializer), so K&R style keeps it on the same
+        // line / Allman puts it on its own line rather than at column 0.
+        let src = concat!(
+            "if (a) {\n",
+            "    x = 1;\n",
+            "} else\n",
+            "#ifdef FOO\n",
+            "{\n",
+            "    y = 2;\n",
+            "}\n",
+            "#endif\n",
+        );
+        let out = fmt(src);
+        assert!(
+            !out.contains("{\n    y = 2;") || out.contains("else\n{") || out.contains("else {"),
+            "brace after else+#ifdef must not be treated as initializer: {out}"
+        );
+        // The body must be indented, not at column 0.
+        assert!(
+            out.contains("    y = 2;"),
+            "body inside else+#ifdef brace must be indented: {out}"
         );
     }
 

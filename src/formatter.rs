@@ -2131,6 +2131,15 @@ impl<'src> Fmt<'src> {
                         normalized
                     };
                     self.write(&normalized);
+                    // If the comment ends the line (next source token is a
+                    // Newline), emit the newline now and mark it consumed so
+                    // skip_ws() doesn't double-count it as a blank line.
+                    // CommentLine does this implicitly because its lexeme
+                    // includes the trailing \n; CommentBlock does not.
+                    if matches!(self.tokens.get(self.pos), Some(t) if t.kind == TokenKind::Newline) {
+                        self.nl();
+                        self.skip_next_newline = true;
+                    }
                     self.set_prev(TokenKind::CommentBlock);
                 }
 
@@ -4305,6 +4314,19 @@ mod tests {
             .filter(|w| w[0].is_empty() && w[1].is_empty() && w[2].is_empty())
             .count();
         assert_eq!(blanks, 0, "too many consecutive blank lines:\n{out}");
+    }
+
+    #[test]
+    fn block_comment_two_blank_lines_preserved() {
+        // Two blank lines between block comments must not collapse to one.
+        // max_blank_lines=2 should allow both to survive.
+        let src = "/*\n * A.\n */\n\n\n/*\n * B.\n */\n";
+        let out = fmt(src);
+        assert_eq!(
+            out,
+            "/*\n * A.\n */\n\n\n/*\n * B.\n */\n",
+            "two blank lines between block comments collapsed:\n{out}"
+        );
     }
 
     #[test]

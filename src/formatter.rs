@@ -1990,11 +1990,13 @@ impl<'src> Fmt<'src> {
                     let normalized = normalized.replace('\n', nl);
 
                     // Classify the directive (always, not just when pp_indent is on).
-                    let trimmed = normalized.trim_start();
-                    let directive = trimmed
+                    let directive: String = normalized
+                        .trim_start()
                         .strip_prefix('#')
-                        .map(|s| s.split_whitespace().next().unwrap_or(""))
-                        .unwrap_or("");
+                        .and_then(|s| s.split_whitespace().next())
+                        .unwrap_or("")
+                        .to_string();
+                    let directive = directive.as_str();
                     let is_open = matches!(directive, "if" | "ifdef" | "ifndef");
                     let is_close = directive == "endif";
                     let is_reopen = matches!(directive, "elif" | "else");
@@ -2022,6 +2024,16 @@ impl<'src> Fmt<'src> {
                             &normalized,
                             self.config.preprocessor.endif_comment_space,
                         )
+                    } else {
+                        normalized
+                    };
+
+                    // Apply space_around_binary_ops to #if / #elif conditions.
+                    let normalized = if self.config.spacing.space_around_binary_ops
+                        && (is_open || is_reopen)
+                        && !matches!(directive, "ifdef" | "ifndef")
+                    {
+                        format_preproc_if_condition(&normalized, nl)
                     } else {
                         normalized
                     };
@@ -3071,6 +3083,229 @@ pub fn format<'src>(tokens: &[Token<'src>], config: &Config) -> Result<String, F
 
 /// Normalizes the whitespace between `#endif` and a trailing `/*` comment to
 /// exactly `spaces` spaces. Lines with no `/*` are returned unchanged.
+/// Apply `space_around_binary_ops` formatting to the condition part of a
+/// `#if` or `#elif` directive line.  The input `line` is the full directive
+/// (starting with `#`, ending with the newline string `nl`).  Returns the
+/// reformatted directive, or the original if it doesn't match.
+fn format_preproc_if_condition(line: &str, nl: &str) -> String {
+    // Split off the trailing newline (or newline sequence).
+    let (body, trailing_nl) = if let Some(b) = line.strip_suffix(nl) {
+        (b, nl)
+    } else if let Some(b) = line.strip_suffix('\n') {
+        (b, "\n")
+    } else {
+        (line, "")
+    };
+
+    // Parse `# <ws>* (if|elif) <ws>+` prefix.
+    let after_hash = match body.strip_prefix('#') {
+        Some(s) => s,
+        None => return line.to_string(),
+    };
+    let after_hash = after_hash.trim_start_matches(|c: char| c == ' ' || c == '\t');
+    let (kw, rest) = if after_hash.starts_with("elif")
+        && !after_hash[4..].starts_with(|c: char| c.is_alphanumeric() || c == '_')
+    {
+        ("elif", &after_hash[4..])
+    } else if after_hash.starts_with("if")
+        && !after_hash[2..].starts_with(|c: char| c.is_alphanumeric() || c == '_')
+    {
+        ("if", &after_hash[2..])
+    } else {
+        return line.to_string();
+    };
+
+    let condition_and_rest = rest.trim_start_matches(|c: char| c == ' ' || c == '\t');
+
+    // Separate any trailing `/* comment */` from the condition.
+    let (condition_raw, trailing_comment) = if let Some(pos) = condition_and_rest.find("/*") {
+        (
+            condition_and_rest[..pos].trim_end(),
+            &condition_and_rest[pos..],
+        )
+    } else {
+        (condition_and_rest.trim_end(), "")
+    };
+
+    let formatted = format_preproc_expr(condition_raw);
+
+    if trailing_comment.is_empty() {
+        format!("#{kw} {formatted}{trailing_nl}")
+    } else {
+        format!("#{kw} {formatted} {trailing_comment}{trailing_nl}")
+    }
+}
+
+/// Operator-only predicate: returns true for characters that begin/continue
+/// an operator token in a preprocessor condition.
+fn is_preproc_op_char(c: char) -> bool {
+    matches!(c, '>' | '<' | '!' | '=' | '&' | '|' | '+' | '-' | '*' | '/' | '%' | '~' | '^')
+}
+
+/// Reformat a preprocessor condition expression with spaces around binary
+/// operators.  Identifiers, numbers, and parens are kept as-is.
+fn format_preproc_expr(expr: &str) -> String {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum TK {
+        Ident,
+        Number,
+        Op,
+        LParen,
+        RParen,
+        Comma,
+    }
+
+    let mut toks: Vec<(TK, &str)> = Vec::new();
+    let bytes = expr.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = expr[i..].chars().next().unwrap();
+        match c {
+            c if c.is_whitespace() => {
+                i += c.len_utf8();
+            }
+            '(' => {
+                toks.push((TK::LParen, &expr[i..i + 1]));
+                i += 1;
+            }
+            ')' => {
+                toks.push((TK::RParen, &expr[i..i + 1]));
+                i += 1;
+            }
+            ',' => {
+                toks.push((TK::Comma, &expr[i..i + 1]));
+                i += 1;
+            }
+            c if c.is_alphabetic() || c == '_' => {
+                let start = i;
+                i += c.len_utf8();
+                while i < expr.len() {
+                    let nc = expr[i..].chars().next().unwrap();
+                    if nc.is_alphanumeric() || nc == '_' {
+                        i += nc.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+                toks.push((TK::Ident, &expr[start..i]));
+            }
+            c if c.is_ascii_digit() => {
+                let start = i;
+                i += 1;
+                while i < expr.len() {
+                    let nc = expr[i..].chars().next().unwrap();
+                    if nc.is_alphanumeric() || nc == '_' || nc == '.' {
+                        i += nc.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+                toks.push((TK::Number, &expr[start..i]));
+            }
+            c if is_preproc_op_char(c) => {
+                let start = i;
+                i += 1;
+                // Two-char operators: >=, <=, ==, !=, &&, ||, <<, >>
+                if i < expr.len() {
+                    let nc = expr[i..].chars().next().unwrap();
+                    if is_preproc_op_char(nc)
+                        && matches!(
+                            (&expr[start..i], nc),
+                            (">" | "<" | "!" | "=" | "&" | "|", '=')
+                                | ("&", '&')
+                                | ("|", '|')
+                                | ("<", '<')
+                                | (">", '>')
+                        )
+                    {
+                        i += nc.len_utf8();
+                    }
+                }
+                toks.push((TK::Op, &expr[start..i]));
+            }
+            c => {
+                // Pass through anything else (e.g. `\` in edge cases)
+                toks.push((TK::Ident, &expr[i..i + c.len_utf8()]));
+                i += c.len_utf8();
+            }
+        }
+    }
+
+    // Reconstruct with spacing.
+    let mut out = String::with_capacity(expr.len() + 16);
+    for (idx, &(tk, s)) in toks.iter().enumerate() {
+        let prev_tk = idx.checked_sub(1).map(|j| toks[j].0);
+        let is_unary = tk == TK::Op
+            && matches!(
+                prev_tk,
+                None | Some(TK::LParen) | Some(TK::Op) | Some(TK::Comma)
+            );
+        match tk {
+            TK::LParen => {
+                // No space before `(` after ident/number (function-call style).
+                let no_space_before = matches!(prev_tk, Some(TK::Ident) | Some(TK::RParen));
+                if !no_space_before && !out.is_empty() {
+                    out.push(' ');
+                }
+                out.push('(');
+            }
+            TK::RParen => {
+                out.push(')');
+            }
+            TK::Comma => {
+                out.push(',');
+            }
+            TK::Op if is_unary => {
+                // Unary: space before (if needed) but NOT after.
+                if !out.is_empty() && !matches!(prev_tk, Some(TK::LParen)) {
+                    // No space after `(` — but after other tokens, add space.
+                    match prev_tk {
+                        Some(TK::Op) if out.ends_with(|c: char| !c.is_whitespace()) => {
+                            // Another op just before — keep as-is (e.g. `!!`)
+                        }
+                        _ => {}
+                    }
+                }
+                out.push_str(s);
+            }
+            TK::Op => {
+                // Binary: space before and after.
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                out.push_str(s);
+                out.push(' ');
+                // Don't push the trailing space yet — we'll push it as the
+                // "needs_space" of the NEXT token, to avoid trailing spaces.
+                // Actually just push it; if the next token is `)` we'll get
+                // `x > )` which is wrong.  Handle specially:
+                // Actually: we pushed the space unconditionally. The next
+                // iteration will decide whether to add space too. Since `)` and
+                // `,` don't check prev_space, they'll just push without extra.
+                // The space we just added will stay.  That's fine for binary
+                // op followed by `)` which shouldn't occur in valid C anyway.
+            }
+            TK::Ident | TK::Number => {
+                // Space before if previous was a value token or `)`.
+                let needs_space = matches!(
+                    prev_tk,
+                    Some(TK::Ident) | Some(TK::Number) | Some(TK::RParen)
+                );
+                if needs_space || (out.ends_with(' ') && false) {
+                    // `out.ends_with(' ')` is already handled by Op above.
+                }
+                if needs_space {
+                    out.push(' ');
+                }
+                out.push_str(s);
+            }
+        }
+    }
+
+    // Trim trailing space left by binary op at end (shouldn't happen, but safe).
+    out.trim_end().to_string()
+}
+
 fn normalize_endif_spacing(line: &str, spaces: u32) -> String {
     if let Some(pos) = line.find("/*") {
         let before = line[..pos].trim_end();
@@ -3794,6 +4029,37 @@ mod tests {
         let src = "#include <stdio.h>\nint x;\n";
         let out = fmt(src);
         assert!(out.starts_with("#include <stdio.h>"), "got:\n{out}");
+    }
+
+    #[test]
+    fn preproc_if_condition_operator_spacing() {
+        let src = "#if SQLITE_MALLOC_SOFT_LIMIT>0\nint x;\n#endif\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("#if SQLITE_MALLOC_SOFT_LIMIT > 0"),
+            "spaces missing around > in #if: got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn preproc_elif_condition_operator_spacing() {
+        let src = "#if FOO\nint x;\n#elif BAR>=BAZ&&defined(QUX)\nint y;\n#endif\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("#elif BAR >= BAZ && defined(QUX)"),
+            "spaces missing in #elif condition: got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn preproc_ifdef_unchanged() {
+        // #ifdef/#ifndef should NOT have operator spacing applied.
+        let src = "#ifdef NDEBUG\nint x;\n#endif\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("#ifdef NDEBUG"),
+            "ifdef unexpectedly reformatted: got:\n{out}"
+        );
     }
 
     #[test]

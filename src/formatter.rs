@@ -1,4 +1,4 @@
-use crate::config::{AlignCmtStyle, BraceStyle, Config, ExternCBrace, IndentStyle, PointerAlign};
+use crate::config::{AlignCmtStyle, BraceStyle, Config, ExternCBrace, IndentStyle, PointerAlign, SpaceOption};
 use crate::error::FunkyError;
 use crate::token::{Span, Token, TokenKind};
 
@@ -350,6 +350,10 @@ struct Fmt<'src> {
     /// When true, the next Newline token seen in skip_ws was already emitted
     /// by the formatter (e.g. after `;` or `}`), so it must not be re-counted.
     skip_next_newline: bool,
+    /// Set by `skip_ws()` to true when at least one `Whitespace` token was
+    /// consumed between the previous token and the upcoming one.  Used by
+    /// `SpaceOption::Preserve` to reproduce the source spacing.
+    src_had_inline_ws: bool,
     /// The last non-whitespace, non-newline token kind we emitted.
     prev: Option<TokenKind>,
     /// Number of switch bodies we are currently inside — used to dedent case/default.
@@ -465,6 +469,7 @@ impl<'src> Fmt<'src> {
             bracket_depth: 0,
             blank_lines: 0,
             skip_next_newline: false,
+            src_had_inline_ws: false,
             prev: None,
             switch_depth: 0,
             case_body_stack: Vec::new(),
@@ -514,10 +519,12 @@ impl<'src> Fmt<'src> {
     /// dropped because the formatter already emitted a newline for it (e.g.
     /// the `\n` the formatter writes after `;` or `}`).
     fn skip_ws(&mut self) {
+        self.src_had_inline_ws = false;
         let mut synthetic_consumed = false;
         while let Some(t) = self.tokens.get(self.pos) {
             match t.kind {
                 TokenKind::Whitespace => {
+                    self.src_had_inline_ws = true;
                     self.pos += 1;
                 }
                 TokenKind::Newline => {
@@ -1834,7 +1841,11 @@ impl<'src> Fmt<'src> {
             if matches!(prev, TokenKind::RParen) {
                 // Cast: honour space_after_cast; function-pointer call: no space.
                 if self.last_was_cast_close {
-                    return self.config.spacing.space_after_cast;
+                    return match self.config.spacing.space_after_cast {
+                        SpaceOption::Add => true,
+                        SpaceOption::Remove => false,
+                        SpaceOption::Preserve => self.src_had_inline_ws,
+                    };
                 }
                 return false;
             }
@@ -1869,7 +1880,11 @@ impl<'src> Fmt<'src> {
             && prev == TokenKind::RParen
             && matches!(next, TokenKind::Star | TokenKind::Amp)
         {
-            return self.config.spacing.space_after_cast;
+            return match self.config.spacing.space_after_cast {
+                SpaceOption::Add => true,
+                SpaceOption::Remove => false,
+                SpaceOption::Preserve => self.src_had_inline_ws,
+            };
         }
 
         // Binary operators — space on both sides if configured
@@ -1911,7 +1926,11 @@ impl<'src> Fmt<'src> {
         // The `next == LParen && prev == RParen` case already returned false above,
         // so this only fires when the next token is not `(`.
         if prev == TokenKind::RParen && self.last_was_cast_close {
-            return self.config.spacing.space_after_cast;
+            return match self.config.spacing.space_after_cast {
+                SpaceOption::Add => true,
+                SpaceOption::Remove => false,
+                SpaceOption::Preserve => self.src_had_inline_ws,
+            };
         }
 
         // Default: space between two identifier-like tokens
@@ -4326,20 +4345,20 @@ mod tests {
 
     #[test]
     fn void_cast_statement_indented() {
-        // (void)expr; must keep indentation; with space_after_cast=true (default) a
-        // space is added: `(void) func()`. fn_brace_newline=true puts the function { on its own line.
+        // (void)expr; must keep indentation. Default space_after_cast=preserve so
+        // no-space source stays no-space. fn_brace_newline=true puts { on its own line.
         let src = "void f() {\n    (void)func();\n    (void)bar(1, 2);\n}\n";
         let out = fmt(src);
         assert_eq!(
             out,
-            "void f()\n{\n    (void) func();\n    (void) bar(1, 2);\n}\n"
+            "void f()\n{\n    (void)func();\n    (void)bar(1, 2);\n}\n"
         );
     }
 
     #[test]
     fn cast_space_after_cast_false() {
         let mut cfg = Config::default();
-        cfg.spacing.space_after_cast = false;
+        cfg.spacing.space_after_cast = SpaceOption::Remove;
         let src = "void f() { int x = (int)3.14; }\n";
         let out = fmt_with(src, &cfg);
         assert!(
@@ -4353,7 +4372,7 @@ mod tests {
         // Chained casts: (double)(int)x — no space between the two parens regardless of
         // space_after_cast, because the inner `(int)x` is itself a cast expression.
         let mut cfg = Config::default();
-        cfg.spacing.space_after_cast = false;
+        cfg.spacing.space_after_cast = SpaceOption::Remove;
         let src = "void f() { double d = (double)(int)x; }\n";
         let out = fmt_with(src, &cfg);
         assert!(
@@ -4365,7 +4384,7 @@ mod tests {
     #[test]
     fn cast_space_after_cast_true() {
         let mut cfg = Config::default();
-        cfg.spacing.space_after_cast = true;
+        cfg.spacing.space_after_cast = SpaceOption::Add;
         // Primitive cast before identifier.
         let src = "void f() { int x = (int)3.14; }\n";
         let out = fmt_with(src, &cfg);
@@ -4384,7 +4403,7 @@ mod tests {
     fn cast_user_defined_type_no_space() {
         // (MyType) val — user-defined type cast honors space_after_cast=false.
         let mut cfg = Config::default();
-        cfg.spacing.space_after_cast = false;
+        cfg.spacing.space_after_cast = SpaceOption::Remove;
         let src = "void f() { MyType x = (MyType) val; }\n";
         let out = fmt_with(src, &cfg);
         assert!(
@@ -4397,7 +4416,7 @@ mod tests {
     fn cast_followed_by_dereference_no_space() {
         // (type)*ptr — cast + dereference: space_after_cast does not insert space before `*`.
         let mut cfg = Config::default();
-        cfg.spacing.space_after_cast = false;
+        cfg.spacing.space_after_cast = SpaceOption::Remove;
         let src = "void f() { uint32_t x = (uint32_t)*ptr; int y = (int)*p; }\n";
         let out = fmt_with(src, &cfg);
         assert!(out.contains("(uint32_t)*ptr"), "cast+deref uint32_t: {out}");
@@ -4428,7 +4447,7 @@ mod tests {
     fn cast_user_defined_pointer_no_space() {
         // (MyType *) val — pointer cast with space_after_cast=false.
         let mut cfg = Config::default();
-        cfg.spacing.space_after_cast = false;
+        cfg.spacing.space_after_cast = SpaceOption::Remove;
         let src = "void f() { MyType *x = (MyType *) val; }\n";
         let out = fmt_with(src, &cfg);
         assert!(
@@ -5899,11 +5918,11 @@ mod tests {
     #[test]
     fn space_after_comma_not_eaten_by_cast_pointer() {
         // Same leak pattern with an explicit cast `(unsigned char *)buf`.
-        // With space_after_cast=true (default) a space appears: `(unsigned char *) buf`.
+        // Default space_after_cast=preserve so no-space source stays no-space.
         let src = "void f(void) {\n    fn(ctx, (unsigned char *)buf, (unsigned int)len);\n}\n";
         let out = fmt(src);
         assert!(
-            out.contains("(unsigned char *) buf, (unsigned int) len"),
+            out.contains("(unsigned char *)buf, (unsigned int)len"),
             "space after comma following a cast must not be suppressed: {out}"
         );
     }

@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::path::Path;
 
 use crate::error::FunkyError;
@@ -209,6 +209,52 @@ pub enum ExternCBrace {
     Preserve,
 }
 
+// ── SpaceOption ───────────────────────────────────────────────────────────────
+
+/// Tristate for optional spacing rules.
+///
+/// `preserve` (default) leaves the source as-is, matching uncrustify's passive
+/// behaviour when the corresponding `sp_*` option is not set in the config.
+/// `add` always inserts a space; `remove` always removes one.
+///
+/// Accepts both the string form (`"preserve"`, `"add"`, `"remove"`) and the
+/// legacy boolean form (`true` → add, `false` → remove) for backward compat.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SpaceOption {
+    /// Always add a space.
+    Add,
+    /// Always remove a space.
+    Remove,
+    /// Leave the source spacing unchanged (default).
+    #[default]
+    Preserve,
+}
+
+impl<'de> Deserialize<'de> for SpaceOption {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::{self, Visitor};
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = SpaceOption;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, r#""add", "remove", "preserve", true, or false"#)
+            }
+            fn visit_bool<E: de::Error>(self, v: bool) -> Result<SpaceOption, E> {
+                Ok(if v { SpaceOption::Add } else { SpaceOption::Remove })
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<SpaceOption, E> {
+                match v {
+                    "add" => Ok(SpaceOption::Add),
+                    "remove" => Ok(SpaceOption::Remove),
+                    "preserve" => Ok(SpaceOption::Preserve),
+                    _ => Err(E::unknown_variant(v, &["add", "remove", "preserve"])),
+                }
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
 // ── Spacing ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize)]
@@ -220,7 +266,7 @@ pub struct SpacingConfig {
     pub space_around_binary_ops: bool,
     pub space_inside_parens: bool,
     pub space_inside_brackets: bool,
-    pub space_after_cast: bool,
+    pub space_after_cast: SpaceOption,
     pub pointer_align: PointerAlign,
     pub space_inside_angle_brackets: bool,
     /// Align trailing `//` and `/* */` inline comments within groups of nearby
@@ -263,7 +309,7 @@ impl Default for SpacingConfig {
             space_around_binary_ops: true,
             space_inside_parens: false,
             space_inside_brackets: false,
-            space_after_cast: true,
+            space_after_cast: SpaceOption::default(),
             pointer_align: PointerAlign::Name,
             space_inside_angle_brackets: false,
             align_right_cmt_span: 3,

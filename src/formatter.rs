@@ -3083,7 +3083,12 @@ pub fn format<'src>(tokens: &[Token<'src>], config: &Config) -> Result<String, F
         output
     };
     let output = if config.spacing.align_doxygen_cmt_span > 0 {
-        align_doxygen_comments(&output, nl)
+        align_doxygen_comments(
+            &output,
+            nl,
+            config.spacing.align_on_tabstop,
+            config.indent.width as usize,
+        )
     } else {
         output
     };
@@ -3728,14 +3733,14 @@ fn trailing_doxygen_col(line: &str) -> Option<usize> {
 /// break an alignment group — blank lines and closing-brace lines do break it.
 fn is_transparent_doxygen_line(line: &str) -> bool {
     let trimmed = line.trim_start();
-    !trimmed.is_empty() && !trimmed.starts_with('}')
+    !trimmed.is_empty() && !line.starts_with('}')
 }
 
 /// Align trailing `/**<` Doxygen member comments within groups of consecutive
 /// lines that all carry such a comment.  Comment-less member lines (e.g. a field
 /// with no doc) are transparent: they extend the group without being rewritten
 /// themselves.  Blank lines and closing-brace lines break the group.
-fn align_doxygen_comments(output: &str, nl: &str) -> String {
+fn align_doxygen_comments(output: &str, nl: &str, on_tabstop: bool, tab_width: usize) -> String {
     let lines: Vec<&str> = output.split(nl).collect();
     let n = lines.len();
     let cols: Vec<Option<usize>> = lines.iter().map(|l| trailing_doxygen_col(l)).collect();
@@ -3760,12 +3765,19 @@ fn align_doxygen_comments(output: &str, nl: &str) -> String {
                     .map(|&k| lines[k][..cols[k].unwrap()].trim_end().len())
                     .max()
                     .unwrap();
-                let target = max_code_len + 1;
+                let raw_target = max_code_len + 1;
+                let computed_min = if on_tabstop && tab_width > 0 {
+                    round_up_to_multiple(raw_target, tab_width)
+                } else {
+                    raw_target
+                };
+                let max_existing = commented.iter().map(|&k| cols[k].unwrap()).max().unwrap();
+                let target = computed_min.max(max_existing);
                 for k in commented {
                     let col = cols[k].unwrap();
                     let code = lines[k][..col].trim_end();
                     let comment = &lines[k][col..];
-                    let pad = target - code.len();
+                    let pad = target.max(code.len() + 1) - code.len();
                     result[k] = format!("{}{}{}", code, " ".repeat(pad), comment);
                 }
             }

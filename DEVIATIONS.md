@@ -51,6 +51,10 @@ Issues found during comparison that were resolved.
 | Binary `&` and `\|` in `if`/`while`/`for` conditions misclassified as pointer declarators | `star_after_ident_is_decl()` checked for `TokenKind::Keyword` but control keywords use dedicated `KwIf`/`KwWhile`/etc. variants — fixed both backward-scan checks | `formatter.rs` |
 | Missing space after `;` before unary `*`/`&`/`+`/`-` in for-loop header | `needs_space()` returned false for `is_binary_op` tokens in unary context after `Semi`; added early-return for `prev == Semi && paren_depth > 0` | `formatter.rs` |
 | `case X:` followed by `{` on the next line — brace at column 0, body double-indented | `infer_brace_ctx()` returned `Other` for `Colon → {`; added `last_was_case_colon` flag so case-label braces get `BraceCtx::Block`; also fixed double-indent when `indent_switch_case = true` | `formatter.rs` |
+| `=` inside string/char literals treated as enum assignment — spaces inserted mid-string (e.g. `"dst                  ="`) | `enum_eq_col()` scanner did not track string/char-literal state; rewrote as a state-machine that skips `=` inside quoted content. Fixed 11 hostap files. | `formatter.rs` |
+| `!(key_flag & MASK)` — `!` or `~` before `(` causes `&`/`\|` inside to be misread as pointer declarator | `star_after_ident_is_decl()` outer-expression guard did not include `Bang`/`Tilde`; added both so negation/complement before a paren is recognized as expression context. Fixed 54 hostap files. | `formatter.rs` |
+| `for (init;; iter)` — erroneous space between consecutive `;;` | `Semi` arm emitted a space when `prev == Semi && peek != RParen`; removed the consecutive-semicolon branch since uncrustify never inserts that space. | `formatter.rs` |
+| EOL-`(` continuation indent wrong for nested parens and assign-continuation call sites | Old formula `(indent_level + 1) * indent_width` ignored visual depth. New formula `line_indent_col + parens_opened_on_line * indent_width` uses two new tracked fields (`line_indent_col`, `line_start_paren_depth`) set at each `indent()`/`nl()` call. Fixed ~100 hostap files. | `formatter.rs` |
 
 ---
 
@@ -65,6 +69,10 @@ Known gaps not yet addressed.
 ---
 
 ## Comparison Notes
+
+- **File-identical count (hostap corpus, May 2026):** 323 / 805 files produce
+  identical output from funky and uncrustify (40.1%). Remaining divergences are
+  accounted for by the known gaps in the By Design and Will Fix tables above.
 
 - **Trailing comment alignment (groups):** Funky aligns multi-line groups of trailing
   comments to a common column (`align_right_cmt_span > 0`). Uncrustify does the same

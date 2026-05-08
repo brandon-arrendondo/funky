@@ -1756,10 +1756,18 @@ impl<'src> Fmt<'src> {
         ) {
             // RBrace handled separately; RParen/RBracket respect space_inside_* config
             if next == TokenKind::RParen {
-                return self.config.spacing.space_inside_parens;
+                return match self.config.spacing.space_inside_parens {
+                    SpaceOption::Add => true,
+                    SpaceOption::Remove => false,
+                    SpaceOption::Preserve => self.src_had_inline_ws,
+                };
             }
             if next == TokenKind::RBracket {
-                return self.config.spacing.space_inside_brackets;
+                return match self.config.spacing.space_inside_brackets {
+                    SpaceOption::Add => true,
+                    SpaceOption::Remove => false,
+                    SpaceOption::Preserve => self.src_had_inline_ws,
+                };
             }
             if next == TokenKind::RBrace {
                 return false; // newline handled by the RBrace arm
@@ -1783,10 +1791,18 @@ impl<'src> Fmt<'src> {
             TokenKind::LParen | TokenKind::LBracket | TokenKind::Tilde | TokenKind::Bang
         ) {
             if prev == TokenKind::LParen {
-                return self.config.spacing.space_inside_parens;
+                return match self.config.spacing.space_inside_parens {
+                    SpaceOption::Add => true,
+                    SpaceOption::Remove => false,
+                    SpaceOption::Preserve => self.src_had_inline_ws,
+                };
             }
             if prev == TokenKind::LBracket {
-                return self.config.spacing.space_inside_brackets;
+                return match self.config.spacing.space_inside_brackets {
+                    SpaceOption::Add => true,
+                    SpaceOption::Remove => false,
+                    SpaceOption::Preserve => self.src_had_inline_ws,
+                };
             }
             return false;
         }
@@ -2486,10 +2502,18 @@ impl<'src> Fmt<'src> {
                     }
                     self.write("(");
                     self.paren_depth += 1;
-                    // When space_inside_parens is set, the first argument starts
-                    // one column later; include that offset so continuation lines
-                    // align with it rather than with the bare `(`.
-                    let extra = usize::from(self.config.spacing.space_inside_parens);
+                    // When space_inside_parens is Add (or Preserve with source space),
+                    // the first argument starts one column later; include that offset
+                    // so continuation lines align with it rather than the bare `(`.
+                    let extra = match self.config.spacing.space_inside_parens {
+                        SpaceOption::Add => 1,
+                        SpaceOption::Remove => 0,
+                        // Peek at the raw next token to see if source has a space.
+                        SpaceOption::Preserve => usize::from(matches!(
+                            self.tokens.get(self.pos),
+                            Some(t) if t.kind == TokenKind::Whitespace
+                        )),
+                    };
                     self.paren_col_stack.push(self.current_col + extra);
                     // Precompute the EOL continuation column: base indent of
                     // this line plus one indent width per paren opened on it.
@@ -2504,8 +2528,15 @@ impl<'src> Fmt<'src> {
                     self.flush_blank_lines();
                     if self.at_line_start {
                         self.align_to_paren();
-                    } else if self.config.spacing.space_inside_parens {
-                        self.space();
+                    } else {
+                        let want = match self.config.spacing.space_inside_parens {
+                            SpaceOption::Add => true,
+                            SpaceOption::Remove => false,
+                            SpaceOption::Preserve => self.src_had_inline_ws,
+                        };
+                        if want {
+                            self.space();
+                        }
                     }
                     self.write(")");
                     self.paren_depth = self.paren_depth.saturating_sub(1);
@@ -2530,8 +2561,15 @@ impl<'src> Fmt<'src> {
                 }
                 TokenKind::RBracket => {
                     self.flush_blank_lines();
-                    if self.config.spacing.space_inside_brackets && !self.at_line_start {
-                        self.space();
+                    if !self.at_line_start {
+                        let want = match self.config.spacing.space_inside_brackets {
+                            SpaceOption::Add => true,
+                            SpaceOption::Remove => false,
+                            SpaceOption::Preserve => self.src_had_inline_ws,
+                        };
+                        if want {
+                            self.space();
+                        }
                     }
                     self.write("]");
                     self.bracket_depth = self.bracket_depth.saturating_sub(1);
@@ -4715,8 +4753,8 @@ mod tests {
     }
 
     #[test]
-    fn space_inside_parens_false() {
-        // Default: no spaces inside parens — matches uncrustify sp_inside_paren=remove.
+    fn space_inside_parens_preserve_no_space_in_source() {
+        // Default Preserve: source has no spaces inside parens → output has none.
         let src = "void f(int x) { int z = (x + 1); if (z > 0) foo(z); }\n";
         let out = fmt(src);
         assert!(out.contains("f(int x)"), "decl parens: {out}");
@@ -4726,9 +4764,24 @@ mod tests {
     }
 
     #[test]
+    fn space_inside_parens_preserve_with_space_in_source() {
+        // Preserve: source has spaces inside parens → output keeps them.
+        let src = "void f(void) { assert( x > 0 ); testcase( x ); }\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("assert( x > 0 )"),
+            "preserve should keep spaces inside assert(): {out}"
+        );
+        assert!(
+            out.contains("testcase( x )"),
+            "preserve should keep spaces inside testcase(): {out}"
+        );
+    }
+
+    #[test]
     fn space_inside_parens_true() {
         let mut cfg = Config::default();
-        cfg.spacing.space_inside_parens = true;
+        cfg.spacing.space_inside_parens = SpaceOption::Add;
         let src = "void f(int x) { int z = (x + 1); if (z > 0) foo(z); }\n";
         let out = fmt_with(src, &cfg);
         assert!(out.contains("f( int x )"), "decl parens: {out}");
@@ -4746,7 +4799,7 @@ mod tests {
         let src = "void f() { foo(arg1,\narg2,\narg3); }\n";
         let cfg = Config {
             spacing: SpacingConfig {
-                space_inside_parens: true,
+                space_inside_parens: SpaceOption::Add,
                 ..SpacingConfig::default()
             },
             ..Config::default()

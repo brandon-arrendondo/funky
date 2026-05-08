@@ -1632,7 +1632,11 @@ impl<'src> Fmt<'src> {
         while i < self.tokens.len()
             && matches!(
                 self.tokens[i].kind,
-                TokenKind::Whitespace | TokenKind::Newline | TokenKind::PreprocLine
+                TokenKind::Whitespace
+                    | TokenKind::Newline
+                    | TokenKind::PreprocLine
+                    | TokenKind::CommentBlock
+                    | TokenKind::CommentLine
             )
         {
             i += 1;
@@ -3905,6 +3909,31 @@ mod tests {
         let src = "int*p;";
         let out = fmt_with(src, &config);
         assert!(out.contains("int *p"), "name mode: got\n{out}");
+    }
+
+    #[test]
+    fn pointer_align_name_trailing_comment() {
+        // Regression: `Type *name /* comment */` was mis-classified as binary
+        // multiplication because the forward scan hit the comment before a
+        // terminator.  The star should be treated as a pointer declarator.
+        use crate::config::{PointerAlign, SpacingConfig};
+        let config = Config {
+            spacing: SpacingConfig {
+                pointer_align: PointerAlign::Name,
+                ..SpacingConfig::default()
+            },
+            ..Config::default()
+        };
+        let src = "void f(HashElem *elem /* the elem */, Hash *pH /* the hash */);\n";
+        let out = fmt_with(src, &config);
+        assert!(
+            out.contains("HashElem *elem"),
+            "name mode with trailing comment: got\n{out}"
+        );
+        assert!(
+            out.contains("Hash *pH"),
+            "name mode with trailing comment (pH): got\n{out}"
+        );
     }
 
     #[test]

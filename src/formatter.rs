@@ -2292,7 +2292,16 @@ impl<'src> Fmt<'src> {
                             self.write("{");
 
                             // Small initializer: keep entirely on one line.
-                            if let Some(end) = self.small_initializer_end() {
+                            // Large flat initializer: also keep on one line when
+                            // expand_large_initializers is disabled (uncrustify default).
+                            let inline_end = self.small_initializer_end().or_else(|| {
+                                if !self.config.braces.expand_large_initializers {
+                                    self.large_flat_initializer_end()
+                                } else {
+                                    None
+                                }
+                            });
+                            if let Some(end) = inline_end {
                                 let content: Vec<(&str, TokenKind)> = self.tokens[self.pos..end]
                                     .iter()
                                     .filter(|t| {
@@ -2331,20 +2340,17 @@ impl<'src> Fmt<'src> {
                                         }
                                         suppress = false;
                                         self.write(lex);
-                                        // Unary context: after comma, LBrace, or LParen,
-                                        // the next - + * & is unary — suppress space after it.
+                                        // Unary context: after any non-expression-ending
+                                        // token (=, comma, {, (, etc.), - + * & are unary
+                                        // — suppress space between operator and operand.
                                         if matches!(
                                             kind,
                                             TokenKind::Minus
                                                 | TokenKind::Plus
                                                 | TokenKind::Star
                                                 | TokenKind::Amp
-                                        ) && matches!(
-                                            prev_kind,
-                                            TokenKind::Comma
-                                                | TokenKind::LBrace
-                                                | TokenKind::LParen
-                                        ) {
+                                        ) && !prev_kind.ends_expr()
+                                        {
                                             suppress = true;
                                         }
                                         prev_kind = *kind;
@@ -2355,6 +2361,7 @@ impl<'src> Fmt<'src> {
                                 self.set_prev(TokenKind::RBrace);
                                 continue;
                             }
+
                         }
                         // extern "C" { } is a linkage specification. Placement is
                         // controlled by braces.extern_c_brace:
@@ -4032,9 +4039,17 @@ mod tests {
 
     #[test]
     fn large_initializer_expands_one_per_line() {
+        use crate::config::BraceConfig;
+        let config = Config {
+            braces: BraceConfig {
+                expand_large_initializers: true,
+                ..BraceConfig::default()
+            },
+            ..Config::default()
+        };
         // 9 elements (17 non-ws tokens) exceeds the small-init threshold of 16.
         let src = "int a[9] = {0, 1, 2, 3, 4, 5, 6, 7, 8};";
-        let out = fmt(src);
+        let out = fmt_with(src, &config);
         assert!(
             out.contains("{\n    0,\n    1,"),
             "large initializer should expand one element per line, got:\n{out}"

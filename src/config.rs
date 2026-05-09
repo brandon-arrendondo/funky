@@ -182,7 +182,7 @@ impl Default for BraceConfig {
             cuddle_else: false,
             cuddle_catch: false,
             collapse_empty_body: true,
-            expand_large_initializers: true,
+            expand_large_initializers: false,
             fn_brace_newline: true,
             extern_c_brace: ExternCBrace::ForceSameLine,
             add_braces_to_if: true,

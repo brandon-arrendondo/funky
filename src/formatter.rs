@@ -2060,6 +2060,12 @@ impl<'src> Fmt<'src> {
                         if is_open || is_reopen {
                             self.pp_depth += 1;
                         }
+                    } else if self.config.preprocessor.pp_indent_at_level {
+                        let leading = (tok.span.col as usize).saturating_sub(1);
+                        if leading > 0 {
+                            self.write(&" ".repeat(leading));
+                        }
+                        self.write(normalized.trim_start());
                     } else {
                         self.write(&normalized);
                     }
@@ -4874,7 +4880,7 @@ mod tests {
         let src = "}\n\nSM_STATE(WPA, START) {\n    int x;\n    int y;\n#ifdef X\n    int z;\n#endif\n    x = 1;\n}\n";
         let out = fmt_with_var_decl_blank(src);
         assert!(
-            out.contains("int y;\n\n#ifdef") || out.contains("int y;\n\n#ifdef"),
+            out.contains("int y;\n\n#ifdef"),
             "blank line must appear in SM_STATE macro body before #ifdef: {out}"
         );
     }

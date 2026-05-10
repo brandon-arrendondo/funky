@@ -2098,7 +2098,7 @@ impl<'src> Fmt<'src> {
                     }
                     if !self.at_line_start {
                         self.space();
-                    } else {
+                    } else if tok.span.col > 1 {
                         self.indent();
                     }
                     // Emit comment with normalized line ending at the end.

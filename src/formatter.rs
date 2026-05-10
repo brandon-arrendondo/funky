@@ -2244,23 +2244,40 @@ impl<'src> Fmt<'src> {
                             if i > 0 {
                                 out.push_str(nl);
                                 let own_ws = line.len() - line.trim_start().len();
-                                let new_ws = ((own_ws as i64) + delta).max(0) as usize;
-                                // Build new prefix: indent_level tabs/spaces + any
-                                // remaining style-alignment spaces.
-                                if use_spaces {
-                                    for _ in 0..new_ws {
-                                        out.push(' ');
-                                    }
+                                let shifted = ((own_ws as i64) + delta).max(0) as usize;
+                                // When the `/*` didn't move (delta==0), ensure lines at
+                                // or below the `/*` column land at target+1 so content
+                                // is visually inside the opener (uncrustify cmt_indent_multi).
+                                // When delta!=0, the `/*` was shifted by add_braces or
+                                // similar — keep proportional alignment, don't add +1.
+                                let new_ws = if delta == 0
+                                    && (own_ws as i64) <= orig_indent
+                                    && target > 0
+                                {
+                                    shifted.max(target as usize + 1)
                                 } else {
-                                    let tabs = (self.indent_level as usize).min(new_ws);
-                                    for _ in 0..tabs {
-                                        out.push('\t');
+                                    shifted
+                                };
+                                // Build new prefix: indent_level tabs/spaces + any
+                                // remaining style-alignment spaces. Blank lines
+                                // inside block comments get no trailing whitespace.
+                                let trimmed = line.trim_start();
+                                if !trimmed.is_empty() {
+                                    if use_spaces {
+                                        for _ in 0..new_ws {
+                                            out.push(' ');
+                                        }
+                                    } else {
+                                        let tabs = (self.indent_level as usize).min(new_ws);
+                                        for _ in 0..tabs {
+                                            out.push('\t');
+                                        }
+                                        for _ in 0..new_ws.saturating_sub(tabs) {
+                                            out.push(' ');
+                                        }
                                     }
-                                    for _ in 0..new_ws.saturating_sub(tabs) {
-                                        out.push(' ');
-                                    }
+                                    out.push_str(trimmed);
                                 }
-                                out.push_str(line.trim_start());
                             } else {
                                 out.push_str(line);
                             }

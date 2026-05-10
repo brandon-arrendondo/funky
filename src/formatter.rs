@@ -2325,7 +2325,10 @@ impl<'src> Fmt<'src> {
                                         // initializer .field comes after , or { and
                                         // does need a space.
                                         let need_space = !(suppress
-                                            || matches!(kind, TokenKind::Comma)
+                                            || matches!(
+                                                kind,
+                                                TokenKind::Comma | TokenKind::RParen
+                                            )
                                             || matches!(
                                                 prev_kind,
                                                 TokenKind::LBrace
@@ -2334,6 +2337,8 @@ impl<'src> Fmt<'src> {
                                                     | TokenKind::LParen
                                             )
                                             || matches!(kind, TokenKind::Dot | TokenKind::Arrow)
+                                                && prev_kind.ends_expr()
+                                            || matches!(kind, TokenKind::LParen)
                                                 && prev_kind.ends_expr());
                                         if need_space {
                                             self.write(" ");

@@ -1776,9 +1776,13 @@ impl<'src> Fmt<'src> {
             if next == TokenKind::RBrace {
                 return false; // newline handled by the RBrace arm
             }
-            // After `;` in a for-loop header (e.g. `; ++i`), space is required.
+            // Space before prefix ++/--, but not before postfix ++/--.
+            // Postfix: prev ends an expression (e.g. `x++`).
+            // Prefix: prev is operator/punctuation (e.g. `= ++x`, `; ++i`, `, ++x`).
+            // Exception: no space after `(` or `[` (e.g. `(++x)`).
             if matches!(next, TokenKind::PlusPlus | TokenKind::MinusMinus)
-                && prev == TokenKind::Semi
+                && !prev.ends_expr()
+                && !matches!(prev, TokenKind::LParen | TokenKind::LBracket)
             {
                 return true;
             }

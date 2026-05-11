@@ -40,6 +40,7 @@ funky [OPTIONS] <FILES>...
 | `--check` | Exit 1 if any file would change; no writes. |
 | `-r`, `--recursive` | Recurse into directories (C/C++ extensions only). |
 | `-c`, `--config <FILE>` | Explicit config file (default: `funky.toml` in cwd). |
+| `--dump-tokens` | Print the token stream and exit (debug). |
 | `-h`, `--help` | Print help. |
 | `-V`, `--version` | Print version. |
 
@@ -70,38 +71,55 @@ Place a `funky.toml` in your project root (or pass `--config`). All keys are opt
 
 ```toml
 [indent]
-style = "spaces"   # "spaces" | "tabs"
-width = 4          # spaces per level (ignored for tabs)
+style               = "spaces"  # "spaces" | "tabs"
+width               = 4         # spaces per level (ignored for tabs)
+indent_switch_case  = true      # indent case/default labels inside switch
+indent_goto_labels  = false     # false: goto labels at column 0
 
 [braces]
-style                = "kr"    # "kr" | "allman" | "stroustrup"
-cuddle_else          = true    # } else { on same line
-cuddle_catch         = true    # } catch ( on same line
-collapse_empty_body  = true    # { } → {}
-expand_large_initializers = true
-fn_brace_newline     = true    # function-def { always on its own line
+style               = "kr"      # "kr" | "allman" | "stroustrup"
+cuddle_else         = false     # false: } \n else {   true: } else {
+cuddle_catch        = false     # false: } \n catch (  true: } catch (
+collapse_empty_body = true      # while (x) { } → while (x) {}
+fn_brace_newline    = true      # function-def { always on its own line
+extern_c_brace      = "force_same_line"  # "force_same_line" | "preserve"
+nl_brace_else       = true      # true: newline before else/else-if
+add_braces_to_if    = true      # add { } around braceless if bodies
+add_braces_to_while = true      # add { } around braceless while bodies
+add_braces_to_for   = true      # add { } around braceless for bodies
 
 [spacing]
-space_before_call_paren     = false  # foo( vs foo (
-space_before_keyword_paren  = true   # if ( vs if(
+space_before_call_paren     = false      # foo( vs foo (
+space_before_keyword_paren  = true       # if ( vs if(
 space_after_comma           = true
 space_around_binary_ops     = true
-space_inside_parens         = false
-space_inside_brackets       = false
-space_after_cast            = false
-pointer_align               = "name"   # "type" | "name" | "middle"
-space_inside_angle_brackets = false    # vector<int> vs vector< int >
-align_right_cmt_span        = 3        # 0=off; column-align trailing // comments
-align_enum_equ_span         = 1        # 0=off; align enum = signs
-align_doxygen_cmt_span      = 1        # 0=off; column-align /**< comments
+space_inside_parens         = "preserve" # "preserve" | "add" | "remove"
+space_inside_brackets       = "preserve" # "preserve" | "add" | "remove"
+space_after_cast            = "preserve" # "preserve" | "add" | "remove"
+pointer_align               = "name"     # "type" | "name" | "middle"
+space_inside_angle_brackets = false      # vector<int> vs vector< int >
+align_right_cmt_span        = 3          # 0=off; column-align trailing // comments
+align_right_cmt_gap         = 1          # minimum spaces before aligned comment
+align_right_cmt_style       = "groups"   # "groups" | "all"
+align_enum_equ_span         = 1          # 0=off; align enum = signs
+align_doxygen_cmt_span      = 1          # 0=off; column-align /**< comments
+align_on_tabstop            = true       # snap alignment to indent-width multiples
 
 [newlines]
-style                          = "lf"    # "lf" | "crlf" | "native"
-max_blank_lines                = 2
-final_newline                  = true
+style                           = "lf"   # "lf" | "crlf" | "native"
+max_blank_lines                 = 2
+final_newline                   = true
 blank_line_after_var_decl_block = true
-blank_line_after_open_brace    = false
-merge_line_comment             = false
+blank_line_after_open_brace     = false
+merge_line_comment              = false
+nl_brace_else                   = true   # newline before else (mirrors braces setting)
+
+[preprocessor]
+pp_indent           = false  # indent #if/#else/#endif nesting
+endif_comment_space = 1      # spaces between #endif and trailing /* comment */
+
+[comments]
+normalize_block_comment_closing = false  # false: preserve bare */  true: rewrite to ` */`
 
 [ignore]
 patterns = ["vendor/**", "third_party/**", "*.pb.h"]

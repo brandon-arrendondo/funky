@@ -491,7 +491,7 @@ impl<'src> Lexer<'src> {
     }
 
     /// Scan a preprocessor directive from `#` to end of logical line
-    /// (handles `\` line continuations).
+    /// (handles `\` line continuations and `/* */` block comments that span lines).
     fn scan_preproc(&mut self) {
         loop {
             match self.cursor.peek() {
@@ -505,6 +505,25 @@ impl<'src> Lexer<'src> {
                     if self.cursor.peek() == Some('\n') {
                         self.cursor.advance();
                     }
+                }
+                Some('/') => {
+                    self.cursor.advance();
+                    if self.cursor.peek() == Some('*') {
+                        // Block comment — consume through `*/` even across newlines
+                        // so the continuation line stays part of this PreprocLine.
+                        self.cursor.advance();
+                        loop {
+                            match self.cursor.advance() {
+                                None => break,
+                                Some('*') if self.cursor.peek() == Some('/') => {
+                                    self.cursor.advance();
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    // `/` alone or `//` — just continue the outer loop
                 }
                 Some('\n') | Some('\r') => {
                     // End of logical line — consume the newline into the token.

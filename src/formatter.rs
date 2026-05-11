@@ -30,6 +30,45 @@ fn inj_copy_ws<'src>(tokens: &[Token<'src>], i: &mut usize, out: &mut Vec<Token<
     }
 }
 
+/// Returns true when the unbraced statement body starting at `from` contains a
+/// `PreprocLine` token at brace-depth 0 before the terminating `;`.  Used to
+/// suppress brace injection when the body of an `if`/`for`/`while`/`else`
+/// spans a `#ifdef`/`#else`/`#endif` block — injecting braces in that case
+/// would only wrap one preprocessor branch and corrupt the other.
+fn inj_stmt_has_preproc(tokens: &[Token<'_>], from: usize) -> bool {
+    let mut i = from;
+    // skip leading whitespace/comments
+    while i < tokens.len()
+        && matches!(
+            tokens[i].kind,
+            TokenKind::Whitespace | TokenKind::Newline | TokenKind::CommentBlock | TokenKind::CommentLine
+        )
+    {
+        i += 1;
+    }
+    // If the body is already braced, brace injection won't happen anyway.
+    if i < tokens.len() && tokens[i].kind == TokenKind::LBrace {
+        return false;
+    }
+    let mut depth = 0u32;
+    while i < tokens.len() {
+        match tokens[i].kind {
+            TokenKind::LBrace => depth += 1,
+            TokenKind::RBrace => {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+            }
+            TokenKind::Semi if depth == 0 => return false,
+            TokenKind::PreprocLine if depth == 0 => return true,
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
 fn inj_peek_non_ws(tokens: &[Token<'_>], from: usize) -> usize {
     let mut j = from;
     while j < tokens.len() && matches!(tokens[j].kind, TokenKind::Whitespace | TokenKind::Newline) {
@@ -130,6 +169,22 @@ fn inj_copy_stmt<'src>(
         TokenKind::KwIf | TokenKind::KwFor | TokenKind::KwWhile | TokenKind::KwElse => {
             inj_item(tokens, i, out, config);
         }
+        TokenKind::KwSwitch => {
+            // `switch(cond) { body }` is a block-terminated statement.  Copy
+            // keyword + condition parens + body block, then return.  The
+            // default scanning arm would continue past the closing `}` and
+            // absorb a following `else`, corrupting the source.
+            out.push(tokens[*i].clone());
+            *i += 1;
+            inj_copy_ws(tokens, i, out);
+            if *i < tokens.len() && tokens[*i].kind == TokenKind::LParen {
+                inj_copy_paren(tokens, i, out);
+            }
+            inj_copy_ws_or_cmt(tokens, i, out);
+            if *i < tokens.len() && tokens[*i].kind == TokenKind::LBrace {
+                inj_copy_block(tokens, i, out, config);
+            }
+        }
         _ => {
             let mut depth = 0u32;
             while *i < tokens.len() {
@@ -202,6 +257,14 @@ fn inj_handle_if<'src>(
             out.push(tokens[*i].clone());
             *i += 1;
         }
+    } else if j < tokens.len() && tokens[j].kind == TokenKind::PreprocLine
+        || inj_stmt_has_preproc(tokens, *i)
+    {
+        // Preprocessor directive between condition and body, or inside the body
+        // — don't inject braces, since the added `}` would be unbalanced after
+        // preprocessing.
+        inj_copy_ws(tokens, i, out);
+        inj_copy_stmt(tokens, i, out, config);
     } else {
         inj_copy_ws(tokens, i, out);
         out.push(inj_synthetic(TokenKind::LBrace, "{"));
@@ -235,6 +298,15 @@ fn inj_handle_else<'src>(
             out.push(tokens[*i].clone());
             *i += 1;
         }
+        TokenKind::PreprocLine => {
+            // Preprocessor directive between else and body — don't inject braces,
+            // since the added `}` would be unbalanced after preprocessing.
+            inj_copy_stmt(tokens, i, out, config);
+        }
+        _ if inj_stmt_has_preproc(tokens, *i - 1) => {
+            // Body contains a preprocessor directive — skip brace injection.
+            inj_copy_stmt(tokens, i, out, config);
+        }
         _ => {
             out.push(inj_synthetic(TokenKind::LBrace, "{"));
             inj_copy_stmt(tokens, i, out, config);
@@ -264,6 +336,13 @@ fn inj_handle_ctrl<'src>(
         if *i < tokens.len() {
             inj_item(tokens, i, out, config);
         }
+    } else if (j < tokens.len() && tokens[j].kind == TokenKind::PreprocLine)
+        || inj_stmt_has_preproc(tokens, *i)
+    {
+        // Preprocessor directive between condition and body, or inside the body
+        // — don't inject braces.
+        inj_copy_ws(tokens, i, out);
+        inj_copy_stmt(tokens, i, out, config);
     } else {
         inj_copy_ws(tokens, i, out);
         out.push(inj_synthetic(TokenKind::LBrace, "{"));
@@ -1327,6 +1406,9 @@ impl<'src> Fmt<'src> {
                 }
             }
             TokenKind::KwElse | TokenKind::KwDo | TokenKind::KwTry => BraceCtx::Block,
+            // A `{` that immediately follows a preprocessor directive is a block
+            // brace (else body, function body guarded by #if, etc.), not an initializer.
+            TokenKind::PreprocLine => BraceCtx::Block,
             TokenKind::Ident | TokenKind::Gt => {
                 // Ident: could be a named type `class Foo {` or a function body.
                 // Gt: template specialization `class Foo<T> {`.
@@ -2426,6 +2508,12 @@ impl<'src> Fmt<'src> {
                                     && !self.rparen_closes_ctrl_flow();
                                 if fn_newline {
                                     self.ensure_own_line();
+                                } else if self.at_line_start
+                                    && self.prev == Some(TokenKind::PreprocLine)
+                                {
+                                    // Never pull `{` onto a preprocessor directive line
+                                    // (e.g. `else\n#endif\n{`). Keep it on its own line.
+                                    self.indent();
                                 } else {
                                     if self.at_line_start {
                                         // Source had Allman-style brace; enforce KR.
@@ -3233,6 +3321,12 @@ fn add_space_after_comma(s: &str) -> String {
 /// (starting with `#`, ending with the newline string `nl`).  Returns the
 /// reformatted directive, or the original if it doesn't match.
 fn format_preproc_if_condition(line: &str, nl: &str) -> String {
+    // Multi-line conditions (backslash continuations) can't be safely
+    // reformatted — pass through verbatim.
+    if line.contains("\\\n") || line.contains("\\\r\n") || line.contains("\\\r") {
+        return line.to_string();
+    }
+
     // Split off the trailing newline (or newline sequence).
     let (body, trailing_nl) = if let Some(b) = line.strip_suffix(nl) {
         (b, nl)
@@ -3637,8 +3731,8 @@ fn enum_eq_col(line: &str) -> Option<usize> {
             }
             b'=' if !in_string && !in_char => {
                 if i + 1 < bytes.len() && bytes[i + 1] == b'=' {
-                    i += 1;
-                    continue; // ==
+                    i += 2; // skip both `=` of `==`
+                    continue;
                 }
                 if i > 0
                     && matches!(
@@ -6732,9 +6826,10 @@ mod tests {
             "#endif\n",
         );
         let out = fmt(src);
+        // The `{` must not be placed inline with the preprocessor directive.
         assert!(
-            !out.contains("{\n    y = 2;") || out.contains("else\n{") || out.contains("else {"),
-            "brace after else+#ifdef must not be treated as initializer: {out}"
+            !out.contains("#ifdef FOO {"),
+            "brace after else+#ifdef must not be placed on the directive line: {out}"
         );
         // The body must be indented, not at column 0.
         assert!(

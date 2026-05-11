@@ -437,6 +437,13 @@ impl<'src> Lexer<'src> {
                 }
             }
 
+            // `\` immediately before a newline (or at EOF) is a line-continuation
+            // splice.  It is valid outside #define too (C translation phase 1).
+            // Emit as LineContinuation without a warning; the Newline token follows.
+            '\\' if matches!(self.cursor.peek(), Some('\n') | Some('\r') | None) => {
+                TokenKind::LineContinuation
+            }
+
             other => {
                 let warn = self.lex_err(
                     format!("unexpected character U+{:04X} {:?}", other as u32, other),

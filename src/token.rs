@@ -74,6 +74,12 @@ pub enum TokenKind {
     // ── Preprocessor (entire logical line, including \ continuations) ────────
     PreprocLine,
 
+    // ── Line continuation outside preprocessor ───────────────────────────────
+    // A bare `\` immediately before a newline (or EOF) in regular C/C++ code.
+    // Phase-1 splicing makes it invisible to the compiler, but we preserve it
+    // so the formatted output remains byte-for-byte identical in this regard.
+    LineContinuation,
+
     // ── Delimiters ───────────────────────────────────────────────────────────
     LParen,
     RParen,

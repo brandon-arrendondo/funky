@@ -2078,6 +2078,22 @@ impl<'src> Fmt<'src> {
                     break;
                 }
 
+                // ── Line continuation outside preprocessor ────────────────────
+                // `\` immediately before a newline in regular C/C++ code (phase-1
+                // splice).  Write it verbatim; the following Newline token handles
+                // the line break as usual.  Don't call set_prev so the token that
+                // precedes `\` remains as `prev` for the continuation line.
+                TokenKind::LineContinuation => {
+                    self.flush_blank_lines();
+                    if self.at_line_start {
+                        self.indent();
+                    } else if self.needs_space(tok.kind) {
+                        self.space();
+                    }
+                    self.write(tok.lexeme);
+                    // set_prev intentionally omitted — backslash is transparent.
+                }
+
                 // ── Preprocessor — pass through verbatim, normalized newlines ─
                 TokenKind::PreprocLine => {
                     self.flush_blank_lines();
@@ -7198,6 +7214,18 @@ mod tests {
         assert!(
             out.contains("i++) {") || out.contains("i < n; i++) {"),
             "for brace:\n{out}"
+        );
+    }
+
+    #[test]
+    fn line_continuation_outside_preproc_preserved() {
+        // `\` + newline in a function call (C phase-1 splice) must be preserved
+        // verbatim and must not generate a lex warning.
+        let src = "void f() {\n    foo(A \\\n        | B);\n}\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("A \\\n"),
+            "backslash-newline must be preserved:\n{out}"
         );
     }
 

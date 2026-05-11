@@ -411,8 +411,9 @@ impl<'src> Lexer<'src> {
             '0'..='9' => self.scan_number(c),
 
             // ── Identifiers, keywords, and string/char prefixes ───────────────
-            c if c.is_alphabetic() || c == '_' => {
-                self.cursor.eat_while(|c| c.is_alphanumeric() || c == '_');
+            // `$` is a GCC/Clang extension allowed in identifiers.
+            c if c.is_alphabetic() || c == '_' || c == '$' => {
+                self.cursor.eat_while(|c| c.is_alphanumeric() || c == '_' || c == '$');
                 let word = self.cursor.slice_from(start);
 
                 // Check for string/char literal prefix
@@ -828,5 +829,24 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         let msg = warnings[0].to_string();
         assert!(msg.contains("U+0040"), "expected U+0040 in warning: {msg}");
+    }
+
+    #[test]
+    fn dollar_in_identifier() {
+        // `$` is a GCC/Clang extension identifier character — no warnings.
+        let (tokens, warnings) = tokenize("int $var = $OTHER;", "<test>").unwrap();
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        let k: Vec<_> = tokens
+            .iter()
+            .filter(|t| !matches!(t.kind, Whitespace | Newline | Eof))
+            .map(|t| t.kind)
+            .collect();
+        assert_eq!(k, [Keyword, Ident, Eq, Ident, Semi]);
+        let lexemes: Vec<_> = tokens
+            .iter()
+            .filter(|t| !matches!(t.kind, Whitespace | Newline | Eof))
+            .map(|t| t.lexeme)
+            .collect();
+        assert_eq!(lexemes, ["int", "$var", "=", "$OTHER", ";"]);
     }
 }

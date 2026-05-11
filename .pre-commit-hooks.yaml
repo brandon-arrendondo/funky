@@ -1,0 +1,6 @@
+- id: funky
+  name: funky
+  description: Format C/C++ source files with funky
+  entry: funky --in-place
+  language: rust
+  types_or: [c, c++]

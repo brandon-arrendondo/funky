@@ -78,14 +78,14 @@ jobs:
         run: ${{ matrix.funky_binary }} --version
 
       - name: Install cargo-about
-        run: cargo install cargo-about --locked
+        run: cargo install cargo-about --features cli
 
       - name: Generate Third-Party Licenses
         shell: bash
         run: cargo about generate about.hbs -o THIRD_PARTY_LICENSES.txt
 
       - name: Install cargo-cyclonedx
-        run: cargo install cargo-cyclonedx --locked
+        run: cargo install cargo-cyclonedx
 
       - name: Generate SBOM (CycloneDX)
         shell: bash

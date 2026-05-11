@@ -120,7 +120,16 @@ fn expand_paths(
             .map_err(|e| anyhow::anyhow!("could not stat {}: {}", input.display(), e))?;
 
         if meta.is_file() {
-            out.push(input.clone());
+            // Apply ignore patterns to directly-passed files too, matching
+            // against both the full path and just the filename component.
+            let ignored = ignore.is_match(input)
+                || input
+                    .file_name()
+                    .map(|n| ignore.is_match(Path::new(n)))
+                    .unwrap_or(false);
+            if !ignored {
+                out.push(input.clone());
+            }
             continue;
         }
 

@@ -241,9 +241,12 @@ fn inj_handle_if<'src>(
     out.push(tokens[*i].clone()); // `if`
     *i += 1;
     inj_copy_ws(tokens, i, out);
-    if *i < tokens.len() && tokens[*i].kind == TokenKind::LParen {
-        inj_copy_paren(tokens, i, out);
+    // Valid C/C++ `if` always has a `(` condition. If no `(` follows (e.g. `if`
+    // used as a macro argument), don't inject braces.
+    if *i >= tokens.len() || tokens[*i].kind != TokenKind::LParen {
+        return;
     }
+    inj_copy_paren(tokens, i, out);
     let j = inj_peek_non_ws_or_cmt(tokens, *i);
     if j < tokens.len() && tokens[j].kind == TokenKind::LBrace {
         // Already braced — still recurse inside so nested bodies are also handled.
@@ -3414,6 +3417,28 @@ fn format_preproc_expr(expr: &str) -> String {
             ',' => {
                 toks.push((TK::Comma, &expr[i..i + 1]));
                 i += 1;
+            }
+            // Character and string literals — scan to the closing quote,
+            // respecting backslash escapes, and emit the whole thing as Ident
+            // so the reconstruction logic never splits them or adds spaces inside.
+            '\'' | '"' => {
+                let quote = c;
+                let start = i;
+                i += 1;
+                while i < expr.len() {
+                    let nc = expr[i..].chars().next().unwrap();
+                    i += nc.len_utf8();
+                    if nc == '\\' {
+                        // Skip escaped character.
+                        if i < expr.len() {
+                            let escaped = expr[i..].chars().next().unwrap();
+                            i += escaped.len_utf8();
+                        }
+                    } else if nc == quote {
+                        break;
+                    }
+                }
+                toks.push((TK::Ident, &expr[start..i]));
             }
             c if c.is_alphabetic() || c == '_' => {
                 let start = i;

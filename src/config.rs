@@ -62,8 +62,9 @@ pub struct CommentConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct IgnoreConfig {
-    /// Glob patterns (relative to the directory being walked) to skip.
-    /// Example: ["vendor/**", "third_party/**", "*.pb.h"]
+    /// Glob patterns to skip. Matched against the full path and the filename
+    /// for both recursive walks and directly-passed file arguments.
+    /// Example: ["vendor/**", "third_party/**", "*.pb.h", "vdbe.c"]
     pub patterns: Vec<String>,
 }
 

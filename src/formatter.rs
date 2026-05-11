@@ -2042,6 +2042,17 @@ impl<'src> Fmt<'src> {
             };
         }
 
+        // A numeric literal immediately followed by an identifier with no
+        // intervening whitespace is a preprocessor pp-number token (e.g.
+        // `4WAY_HANDSHAKE_TIMEOUT` in a macro argument).  The lexer splits it
+        // into LitInt + Ident; inserting a space would change the macro argument
+        // and break token-pasting.  Preserve the original spacing.
+        if matches!(prev, TokenKind::LitInt | TokenKind::LitFloat)
+            && next == TokenKind::Ident
+        {
+            return self.src_had_inline_ws;
+        }
+
         // Default: space between two identifier-like tokens
         true
     }
@@ -7187,6 +7198,19 @@ mod tests {
         assert!(
             out.contains("i++) {") || out.contains("i < n; i++) {"),
             "for brace:\n{out}"
+        );
+    }
+
+    #[test]
+    fn pp_number_macro_arg_no_space_inserted() {
+        // `4WAY_HANDSHAKE_TIMEOUT` is a single preprocessor pp-number token.
+        // The lexer splits it as LitInt(4) + Ident; the formatter must not
+        // insert a space between them or the ## token-paste macro breaks.
+        let src = "void f() { R2S(4WAY_HANDSHAKE_TIMEOUT) }\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("R2S(4WAY_HANDSHAKE_TIMEOUT)"),
+            "pp-number must not get a space inserted:\n{out}"
         );
     }
 

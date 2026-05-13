@@ -17,7 +17,7 @@ A fast C/C++ code formatter written in Rust. Handles Unicode source files (Chine
 ## Installation
 
 ```sh
-cargo install funky
+cargo install funky-fmt
 ```
 
 Or build a release binary directly:

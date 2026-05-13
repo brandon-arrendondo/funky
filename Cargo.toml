@@ -4,6 +4,11 @@ version = "0.4.0"
 edition = "2021"
 description = "C/C++ code formatter with Unicode support and TOML configuration"
 license = "MIT"
+authors = ["Brandon Arrendondo <brandon@arrendondo.dev>"]
+repository = "https://github.com/brandon-arrendondo/funky"
+readme = "README.md"
+keywords = ["formatter", "c", "cpp", "unicode", "clang-format"]
+categories = ["development-tools", "command-line-utilities"]
 
 [[bin]]
 name = "funky"

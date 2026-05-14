@@ -156,16 +156,20 @@ patterns = ["vendor/**", "build/**", "*.pb.h", "generated_*.c"]
 
 ## Pre-commit hook
 
+Add funky to your `.pre-commit-config.yaml` and pre-commit will automatically build and install it:
+
 ```yaml
-# .pre-commit-config.yaml
 repos:
-  - repo: local
+  - repo: https://github.com/brandon-arrendondo/funky
+    rev: v0.4.0
     hooks:
-      - id: funky
-        name: funky format check
-        language: system
-        entry: funky --check
-        types: [c, c++]
+      - id: funky  # runs funky --in-place (formats files)
+```
+
+Then run:
+
+```bash
+pre-commit install
 ```
 
 ## Comparison with uncrustify

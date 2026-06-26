@@ -70,6 +70,8 @@ pub enum TokenKind {
     // ── Comments ─────────────────────────────────────────────────────────────
     CommentLine,  // // … \n
     CommentBlock, // /* … */
+    FormatOff,    // /* funky:off */
+    FormatOn,     // /* funky:on */
 
     // ── Preprocessor (entire logical line, including \ continuations) ────────
     PreprocLine,

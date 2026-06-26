@@ -1,5 +1,9 @@
 # funky configuration
 # All keys are optional — defaults shown below.
+#
+# Format-off regions: wrap any block with /* funky:off */ … /* funky:on */
+# to pass its contents through verbatim (no formatting rules applied).
+# Useful for switch tables, hand-aligned initializers, etc.
 
 [indent]
 style = "spaces"   # "spaces" or "tabs"

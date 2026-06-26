@@ -130,6 +130,13 @@ fn is_char_prefix(s: &str) -> bool {
     matches!(s, "L" | "u" | "U" | "u8")
 }
 
+fn is_format_marker(s: &str, marker: &str) -> bool {
+    s.strip_prefix("/*")
+        .and_then(|s| s.strip_suffix("*/"))
+        .map(|s| s.trim() == marker)
+        .unwrap_or(false)
+}
+
 // ── Lexer ────────────────────────────────────────────────────────────────────
 
 pub struct Lexer<'src> {
@@ -241,7 +248,14 @@ impl<'src> Lexer<'src> {
                     TokenKind::CommentLine
                 } else if self.cursor.eat_if('*') {
                     self.scan_block_comment(line, col)?;
-                    TokenKind::CommentBlock
+                    let text = self.cursor.slice_from(start);
+                    if is_format_marker(text, "funky:off") {
+                        TokenKind::FormatOff
+                    } else if is_format_marker(text, "funky:on") {
+                        TokenKind::FormatOn
+                    } else {
+                        TokenKind::CommentBlock
+                    }
                 } else if self.cursor.eat_if('=') {
                     TokenKind::SlashEq
                 } else {
@@ -942,5 +956,25 @@ mod tests {
     fn unterminated_string_still_errors() {
         // a raw newline without a preceding \ is still an error
         assert!(tokenize("\"foo\nbar\"", "<test>").is_err());
+    }
+
+    #[test]
+    fn format_off_on_tokens() {
+        let k = kinds("/* funky:off */\nint x;\n/* funky:on */");
+        assert_eq!(k, [FormatOff, Keyword, Ident, Semi, FormatOn]);
+    }
+
+    #[test]
+    fn format_off_whitespace_variants() {
+        // extra whitespace inside the markers is accepted
+        let k = kinds("/*funky:off*/ /*  funky:on  */");
+        assert_eq!(k, [FormatOff, FormatOn]);
+    }
+
+    #[test]
+    fn regular_block_comment_unchanged() {
+        // a block comment that is not a marker stays as CommentBlock
+        let k = kinds("/* funky:off x */ /* not:off */");
+        assert_eq!(k, [CommentBlock, CommentBlock]);
     }
 }

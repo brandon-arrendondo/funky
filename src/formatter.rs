@@ -539,6 +539,9 @@ struct Fmt<'src> {
     /// Set when the declaration run ends; causes flush_blank_lines to inject a
     /// blank line before the first non-declaration statement.
     force_blank_after_decls: bool,
+    /// True while inside a /* funky:off */ … /* funky:on */ region.
+    /// All tokens are passed through verbatim; no formatting rules apply.
+    format_off: bool,
 }
 
 impl<'src> Fmt<'src> {
@@ -589,6 +592,7 @@ impl<'src> Fmt<'src> {
             at_func_stmt_start: false,
             saw_func_decl: false,
             force_blank_after_decls: false,
+            format_off: false,
         }
     }
 
@@ -3029,6 +3033,33 @@ impl<'src> Fmt<'src> {
 
     fn format(mut self) -> Result<String, FunkyError> {
         loop {
+            // ── format-off passthrough ────────────────────────────────────────
+            if self.format_off {
+                let tok = match self.advance() {
+                    None => break,
+                    Some(t) => t.clone(),
+                };
+                match tok.kind {
+                    TokenKind::Eof => break,
+                    TokenKind::FormatOn => {
+                        // End of the protected region; emit the marker and resume.
+                        self.write(tok.lexeme);
+                        self.format_off = false;
+                        self.skip_next_newline = false;
+                    }
+                    // The formatter already emitted this newline when it handled
+                    // the FormatOff comment — skip it to avoid doubling.
+                    TokenKind::Newline if self.skip_next_newline => {
+                        self.skip_next_newline = false;
+                    }
+                    _ => {
+                        self.skip_next_newline = false;
+                        self.write(tok.lexeme);
+                    }
+                }
+                continue;
+            }
+
             self.skip_ws();
 
             let tok = match self.advance() {
@@ -3063,6 +3094,17 @@ impl<'src> Fmt<'src> {
 
                 // ── Block comment ─────────────────────────────────────────────
                 TokenKind::CommentBlock => {
+                    self.fmt_comment_block(&tok);
+                }
+
+                // ── Format-off / format-on markers ────────────────────────────
+                TokenKind::FormatOff => {
+                    self.fmt_comment_block(&tok);
+                    self.format_off = true;
+                }
+                TokenKind::FormatOn => {
+                    // Stray funky:on without a matching funky:off — treat as a
+                    // regular block comment.
                     self.fmt_comment_block(&tok);
                 }
 
@@ -7310,5 +7352,35 @@ mod tests {
             out.lines().any(|l| l == "};"),
             "closing `}};` should be at column 0:\n{out}"
         );
+    }
+
+    #[test]
+    fn format_off_preserves_region_verbatim() {
+        let src = "void f(void){\nint x=1;\n/* funky:off */\nswitch(x){\ncase 0:break;\n}\n/* funky:on */\nint y=2;\n}\n";
+        let out = fmt(src);
+        // Code outside the off region should be formatted.
+        assert!(out.contains("    int x = 1;"), "before region not formatted:\n{out}");
+        assert!(out.contains("    int y = 2;"), "after region not formatted:\n{out}");
+        // Code inside the off region must be verbatim.
+        assert!(out.contains("switch(x){"), "inside region not preserved:\n{out}");
+        assert!(out.contains("case 0:break;"), "inside region not preserved:\n{out}");
+    }
+
+    #[test]
+    fn format_off_idempotent() {
+        let src = "int a=1;\n/* funky:off */\nint b=2;\n/* funky:on */\nint c=3;\n";
+        let out1 = fmt(src);
+        let out2 = fmt(&out1);
+        assert_eq!(out1, out2, "format-off output not idempotent");
+    }
+
+    #[test]
+    fn stray_format_on_treated_as_comment() {
+        // A /* funky:on */ without a matching /* funky:off */ is a no-op.
+        let src = "int x=1;\n/* funky:on */\nint y=2;\n";
+        let out = fmt(src);
+        assert!(out.contains("int x = 1;"), "got:\n{out}");
+        assert!(out.contains("int y = 2;"), "got:\n{out}");
+        assert!(out.contains("/* funky:on */"), "marker should survive:\n{out}");
     }
 }

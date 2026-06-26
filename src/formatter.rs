@@ -1934,6 +1934,12 @@ impl<'src> Fmt<'src> {
             return false;
         }
 
+        // No space after `...` (variadic ellipsis / GNU range designator).
+        // The no-space-before rule lives in the "never space before" block above.
+        if prev == TokenKind::DotDotDot {
+            return false;
+        }
+
         // No space between unary prefix op and its operand (e.g. `++i`).
         // But if next is a binary op (e.g. `*p++ = x`), fall through to
         // the binary-op spacing rules below.
@@ -2909,6 +2915,9 @@ impl<'src> Fmt<'src> {
 
     fn fmt_lbracket(&mut self) {
         self.flush_blank_lines();
+        if self.at_line_start {
+            self.indent();
+        }
         self.write("[");
         self.bracket_depth += 1;
         self.set_prev(TokenKind::LBracket);
@@ -3281,10 +3290,11 @@ fn render_inline_init(content: &[(&str, TokenKind)]) -> String {
         // expression).  Designated initializer .field comes after , or { and
         // does need a space.
         let need_space = !(suppress
-            || matches!(kind, TokenKind::Comma | TokenKind::RParen)
+            || matches!(kind, TokenKind::Comma | TokenKind::RParen | TokenKind::RBracket | TokenKind::DotDotDot)
+            || prev_kind == TokenKind::DotDotDot  // no space after ...
             || matches!(
                 prev_kind,
-                TokenKind::LBrace | TokenKind::Dot | TokenKind::Arrow | TokenKind::LParen
+                TokenKind::LBrace | TokenKind::Dot | TokenKind::Arrow | TokenKind::LParen | TokenKind::LBracket
             )
             || matches!(kind, TokenKind::Dot | TokenKind::Arrow) && prev_kind.ends_expr()
             || matches!(kind, TokenKind::LParen) && prev_kind.ends_expr());
@@ -7382,6 +7392,30 @@ mod tests {
         let src = "int f(int a, int b) { return a&&b; }";
         let out = fmt(src);
         assert!(out.contains("a && b"), "binary && should keep spaces:\n{out}");
+    }
+
+    #[test]
+    fn designated_initializer_indented() {
+        let src = "struct S a[2] = {\n[0].x = 1,\n[1].x = 2,\n};\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("    [0].x = 1,"),
+            "designated initializer should be indented:\n{out}"
+        );
+        assert!(
+            out.contains("    [1].x = 2,"),
+            "designated initializer should be indented:\n{out}"
+        );
+    }
+
+    #[test]
+    fn gnu_range_designator_no_spaces() {
+        let src = "int a[] = { [0 ... 5] = 1 };\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("0...5"),
+            "GNU range designator should have no spaces around ...:\n{out}"
+        );
     }
 
     #[test]

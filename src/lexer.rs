@@ -575,7 +575,29 @@ impl<'src> Lexer<'src> {
                     return Err(self.lex_err("unterminated string literal", line, col));
                 }
                 Some('\\') => {
-                    self.cursor.advance(); // skip escaped char (including Unicode)
+                    match self.cursor.peek() {
+                        // \<LF> or \<CRLF> — line continuation inside string
+                        Some('\n') => {
+                            self.cursor.advance();
+                        }
+                        Some('\r') => {
+                            self.cursor.advance();
+                            self.cursor.eat_if('\n');
+                        }
+                        _ => {
+                            // Regular escape; consume the escape body.
+                            let escaped = self.cursor.advance();
+                            // \\<newline>: escaped backslash + line continuation
+                            if escaped == Some('\\') {
+                                if self.cursor.peek() == Some('\n') {
+                                    self.cursor.advance();
+                                } else if self.cursor.peek() == Some('\r') {
+                                    self.cursor.advance();
+                                    self.cursor.eat_if('\n');
+                                }
+                            }
+                        }
+                    }
                 }
                 Some('"') => return Ok(()),
                 _ => {}
@@ -638,7 +660,26 @@ impl<'src> Lexer<'src> {
                     return Err(self.lex_err("unterminated character literal", line, col));
                 }
                 Some('\\') => {
-                    self.cursor.advance();
+                    match self.cursor.peek() {
+                        Some('\n') => {
+                            self.cursor.advance();
+                        }
+                        Some('\r') => {
+                            self.cursor.advance();
+                            self.cursor.eat_if('\n');
+                        }
+                        _ => {
+                            let escaped = self.cursor.advance();
+                            if escaped == Some('\\') {
+                                if self.cursor.peek() == Some('\n') {
+                                    self.cursor.advance();
+                                } else if self.cursor.peek() == Some('\r') {
+                                    self.cursor.advance();
+                                    self.cursor.eat_if('\n');
+                                }
+                            }
+                        }
+                    }
                 }
                 Some('\'') => return Ok(()),
                 _ => {}
@@ -872,5 +913,34 @@ mod tests {
             .map(|t| t.lexeme)
             .collect();
         assert_eq!(lexemes, ["int", "$var", "=", "$OTHER", ";"]);
+    }
+
+    #[test]
+    fn string_with_null_escape() {
+        // "foo\0" "bar\0" — adjacent strings with \0 escapes must not error
+        let k = kinds(r#""foo\0" "bar\0""#);
+        assert_eq!(k, [LitStr, LitStr]);
+    }
+
+    #[test]
+    fn string_line_continuation() {
+        // "good\\\nnbye" — escaped backslash followed by line continuation
+        let src = "\"good\\\\\nnbye\"";
+        let k = kinds(src);
+        assert_eq!(k, [LitStr]);
+    }
+
+    #[test]
+    fn string_backslash_newline_continuation() {
+        // "\<newline> continuation" — bare line continuation inside string
+        let src = "\"hello\\\nworld\"";
+        let k = kinds(src);
+        assert_eq!(k, [LitStr]);
+    }
+
+    #[test]
+    fn unterminated_string_still_errors() {
+        // a raw newline without a preceding \ is still an error
+        assert!(tokenize("\"foo\nbar\"", "<test>").is_err());
     }
 }

@@ -2325,6 +2325,18 @@ impl<'src> Fmt<'src> {
 
     fn fmt_kw_case_default(&mut self, tok: &Token<'src>) {
         self.flush_blank_lines();
+        // Inside parentheses (e.g. `_Generic(x, int: v, default: v)`) `case`
+        // and `default` are type-association keywords, not switch labels.
+        if self.paren_depth > 0 {
+            if self.at_line_start {
+                self.indent();
+            } else if self.needs_space(tok.kind) {
+                self.space();
+            }
+            self.write(tok.lexeme);
+            self.set_prev(tok.kind);
+            return;
+        }
         if self.at_line_start {
             if self.config.indent.indent_switch_case {
                 // Undo any prior case-body extra indent, then print
@@ -7459,5 +7471,22 @@ mod tests {
         assert!(out.contains("int x = 1;"), "got:\n{out}");
         assert!(out.contains("int y = 2;"), "got:\n{out}");
         assert!(out.contains("/* funky:on */"), "marker should survive:\n{out}");
+    }
+
+    #[test]
+    fn generic_no_runaway_indent() {
+        // `default` inside _Generic must not trigger case-label newline/indent.
+        let src = "void f(void)\n{\n    int x = 5;\n    int r = _Generic(x,\n        int: 1,\n        double: 2,\n        default: 0);\n}\n";
+        let out = fmt(src);
+        // `default: 0` must appear on one line, not split by a case-label newline.
+        assert!(
+            out.contains("default: 0"),
+            "_Generic default arm should not emit a case-label newline:\n{out}"
+        );
+        // The `}` closing the function must appear at column 0 (no runaway indent).
+        assert!(
+            out.lines().any(|l| l == "}"),
+            "function closing `}}` should be at column 0:\n{out}"
+        );
     }
 }

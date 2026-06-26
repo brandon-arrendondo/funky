@@ -405,13 +405,14 @@ fn inject_braces_pass<'src>(
 /// What opened the most recent `{`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BraceCtx {
-    Block, // if/for/while/do/else/try/catch
-    Type,  // struct/class/union/enum
+    Block,      // if/for/while/do/else/try/catch body
+    Standalone, // standalone block scope at statement level (after `;` or `}`)
+    Type,       // struct/class/union/enum
     Namespace,
-    Function, // function definition body
-    Switch,   // switch statement body
-    ExternC,  // extern "C" { } — no extra indentation
-    Other,    // initializer list, lambda capture, etc.
+    Function,   // function definition body
+    Switch,     // switch statement body
+    ExternC,    // extern "C" { } — no extra indentation
+    Other,      // initializer list, lambda capture, etc.
 }
 
 struct Fmt<'src> {
@@ -1449,6 +1450,8 @@ impl<'src> Fmt<'src> {
             | TokenKind::LBracket
             | TokenKind::LBrace
             | TokenKind::Comma => BraceCtx::Other,
+            // After `;` or `}` at statement level → standalone block scope
+            TokenKind::Semi | TokenKind::RBrace => BraceCtx::Standalone,
             _ => BraceCtx::Other,
         }
     }
@@ -2737,6 +2740,12 @@ impl<'src> Fmt<'src> {
                     return true;
                 }
             }
+            // Standalone block scope — always on its own line, regardless of
+            // brace style (it has no preceding keyword or condition to cuddle).
+            BraceCtx::Standalone => {
+                self.ensure_own_line();
+                self.write("{");
+            }
             // extern "C" { } is a linkage specification. Placement is
             // controlled by braces.extern_c_brace:
             //   force_same_line — always K&R (Google/LLVM style)
@@ -2879,7 +2888,7 @@ impl<'src> Fmt<'src> {
         self.nl();
         self.skip_next_newline = true;
         if self.config.newlines.blank_line_after_open_brace
-            && matches!(ctx, BraceCtx::Function | BraceCtx::Block)
+            && matches!(ctx, BraceCtx::Function | BraceCtx::Block | BraceCtx::Standalone)
         {
             self.blank_lines = self.blank_lines.max(1);
         }
@@ -3185,8 +3194,15 @@ impl<'src> Fmt<'src> {
                     self.fmt_ptr_decl(&tok);
                 }
 
-                // ── Unary / binary * & + - (non-declarator) ─────────────────
-                TokenKind::Star | TokenKind::Amp | TokenKind::Plus | TokenKind::Minus => {
+                // ── Unary / binary * & + - && (non-declarator) ──────────────
+                // AmpAmp doubles as the GNU computed-goto label-address operator
+                // (&&label). When not preceded by an expression, suppress the
+                // space between && and the label name.
+                TokenKind::Star
+                | TokenKind::Amp
+                | TokenKind::Plus
+                | TokenKind::Minus
+                | TokenKind::AmpAmp => {
                     self.fmt_unary_binary(&tok);
                 }
 
@@ -3278,10 +3294,11 @@ fn render_inline_init(content: &[(&str, TokenKind)]) -> String {
         suppress = false;
         out.push_str(lex);
         // Unary context: after any non-expression-ending token (=, comma, {,
-        // (, etc.), - + * & are unary — suppress space between op and operand.
+        // (, etc.), - + * & && are unary — suppress space between op and operand.
+        // AmpAmp covers the GNU computed-goto label-address operator (&&label).
         if matches!(
             kind,
-            TokenKind::Minus | TokenKind::Plus | TokenKind::Star | TokenKind::Amp
+            TokenKind::Minus | TokenKind::Plus | TokenKind::Star | TokenKind::Amp | TokenKind::AmpAmp
         ) && !prev_kind.ends_expr()
         {
             suppress = true;
@@ -7339,6 +7356,32 @@ mod tests {
             out.contains("R2S(4WAY_HANDSHAKE_TIMEOUT)"),
             "pp-number must not get a space inserted:\n{out}"
         );
+    }
+
+    #[test]
+    fn standalone_block_indented_correctly() {
+        let src = "int foo(int x) { x += 2;\n{ int y = 3; y += x; } }";
+        let out = fmt(src);
+        assert!(
+            out.contains("    {\n        int y = 3;"),
+            "standalone block should be indented at statement level:\n{out}"
+        );
+    }
+
+    #[test]
+    fn gnu_computed_label_no_space() {
+        let src = "void f(void) { static const void *t[] = { &&lbl1, && lbl2 }; }";
+        let out = fmt(src);
+        assert!(out.contains("&&lbl1"), "got:\n{out}");
+        assert!(out.contains("&&lbl2"), "space should be removed:\n{out}");
+        assert!(!out.contains("&& lbl"), "got:\n{out}");
+    }
+
+    #[test]
+    fn logical_and_still_has_spaces() {
+        let src = "int f(int a, int b) { return a&&b; }";
+        let out = fmt(src);
+        assert!(out.contains("a && b"), "binary && should keep spaces:\n{out}");
     }
 
     #[test]

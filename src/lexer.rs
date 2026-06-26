@@ -232,21 +232,7 @@ impl<'src> Lexer<'src> {
             }
 
             // ── Dot / ellipsis / pointer-to-member ───────────────────────────
-            '.' => {
-                if self.cursor.peek() == Some('.') && self.cursor.peek2() == Some('.') {
-                    self.cursor.advance();
-                    self.cursor.advance();
-                    TokenKind::DotDotDot
-                } else if self.cursor.eat_if('*') {
-                    TokenKind::DotStar
-                } else if matches!(self.cursor.peek(), Some('0'..='9')) {
-                    // float starting with '.'
-                    self.scan_float_tail();
-                    TokenKind::LitFloat
-                } else {
-                    TokenKind::Dot
-                }
-            }
+            '.' => self.scan_dot(),
 
             // ── / comment / divide ───────────────────────────────────────────
             '/' => {
@@ -275,22 +261,7 @@ impl<'src> Lexer<'src> {
             }
 
             // ── - ────────────────────────────────────────────────────────────
-            '-' => {
-                if self.cursor.eat_if('-') {
-                    TokenKind::MinusMinus
-                } else if self.cursor.eat_if('=') {
-                    TokenKind::MinusEq
-                } else if self.cursor.peek() == Some('>') {
-                    self.cursor.advance();
-                    if self.cursor.eat_if('*') {
-                        TokenKind::ArrowStar
-                    } else {
-                        TokenKind::Arrow
-                    }
-                } else {
-                    TokenKind::Minus
-                }
-            }
+            '-' => self.scan_minus(),
 
             // ── * ────────────────────────────────────────────────────────────
             '*' => {
@@ -360,40 +331,10 @@ impl<'src> Lexer<'src> {
             }
 
             // ── < ─ << <<= <= <=> ────────────────────────────────────────────
-            '<' => {
-                if self.cursor.peek() == Some('<') {
-                    self.cursor.advance();
-                    if self.cursor.eat_if('=') {
-                        TokenKind::LtLtEq
-                    } else {
-                        TokenKind::LtLt
-                    }
-                } else if self.cursor.eat_if('=') {
-                    if self.cursor.eat_if('>') {
-                        TokenKind::LtEqGt
-                    } else {
-                        TokenKind::LtEq
-                    }
-                } else {
-                    TokenKind::Lt
-                }
-            }
+            '<' => self.scan_lt(),
 
             // ── > >> >>= >= ──────────────────────────────────────────────────
-            '>' => {
-                if self.cursor.peek() == Some('>') {
-                    self.cursor.advance();
-                    if self.cursor.eat_if('=') {
-                        TokenKind::GtGtEq
-                    } else {
-                        TokenKind::GtGt
-                    }
-                } else if self.cursor.eat_if('=') {
-                    TokenKind::GtEq
-                } else {
-                    TokenKind::Gt
-                }
-            }
+            '>' => self.scan_gt(),
 
             // ── String literals ──────────────────────────────────────────────
             '"' => {
@@ -413,28 +354,7 @@ impl<'src> Lexer<'src> {
             // ── Identifiers, keywords, and string/char prefixes ───────────────
             // `$` is a GCC/Clang extension allowed in identifiers.
             c if c.is_alphabetic() || c == '_' || c == '$' => {
-                self.cursor.eat_while(|c| c.is_alphanumeric() || c == '_' || c == '$');
-                let word = self.cursor.slice_from(start);
-
-                // Check for string/char literal prefix
-                match self.cursor.peek() {
-                    Some('"') if is_str_prefix(word) => {
-                        let is_raw = word.contains('R');
-                        self.cursor.advance(); // consume "
-                        if is_raw {
-                            self.scan_raw_string(line, col)?;
-                        } else {
-                            self.scan_string_content(false)?;
-                        }
-                        TokenKind::LitStr
-                    }
-                    Some('\'') if is_char_prefix(word) => {
-                        self.cursor.advance(); // consume '
-                        self.scan_char_content(line, col)?;
-                        TokenKind::LitChar
-                    }
-                    _ => keyword_kind(word).unwrap_or(TokenKind::Ident),
-                }
+                self.scan_ident_or_prefix(start, line, col)?
             }
 
             // `\` immediately before a newline (or at EOF) is a line-continuation
@@ -456,6 +376,103 @@ impl<'src> Lexer<'src> {
         };
 
         Ok(self.make(kind, start, line, col))
+    }
+
+    // ── Operator / literal scan helpers ──────────────────────────────────────
+
+    fn scan_dot(&mut self) -> TokenKind {
+        if self.cursor.peek() == Some('.') && self.cursor.peek2() == Some('.') {
+            self.cursor.advance();
+            self.cursor.advance();
+            TokenKind::DotDotDot
+        } else if self.cursor.eat_if('*') {
+            TokenKind::DotStar
+        } else if matches!(self.cursor.peek(), Some('0'..='9')) {
+            self.scan_float_tail();
+            TokenKind::LitFloat
+        } else {
+            TokenKind::Dot
+        }
+    }
+
+    fn scan_minus(&mut self) -> TokenKind {
+        if self.cursor.eat_if('-') {
+            TokenKind::MinusMinus
+        } else if self.cursor.eat_if('=') {
+            TokenKind::MinusEq
+        } else if self.cursor.peek() == Some('>') {
+            self.cursor.advance();
+            if self.cursor.eat_if('*') {
+                TokenKind::ArrowStar
+            } else {
+                TokenKind::Arrow
+            }
+        } else {
+            TokenKind::Minus
+        }
+    }
+
+    fn scan_lt(&mut self) -> TokenKind {
+        if self.cursor.peek() == Some('<') {
+            self.cursor.advance();
+            if self.cursor.eat_if('=') {
+                TokenKind::LtLtEq
+            } else {
+                TokenKind::LtLt
+            }
+        } else if self.cursor.eat_if('=') {
+            if self.cursor.eat_if('>') {
+                TokenKind::LtEqGt
+            } else {
+                TokenKind::LtEq
+            }
+        } else {
+            TokenKind::Lt
+        }
+    }
+
+    fn scan_gt(&mut self) -> TokenKind {
+        if self.cursor.peek() == Some('>') {
+            self.cursor.advance();
+            if self.cursor.eat_if('=') {
+                TokenKind::GtGtEq
+            } else {
+                TokenKind::GtGt
+            }
+        } else if self.cursor.eat_if('=') {
+            TokenKind::GtEq
+        } else {
+            TokenKind::Gt
+        }
+    }
+
+    fn scan_ident_or_prefix(
+        &mut self,
+        start: usize,
+        line: u32,
+        col: u32,
+    ) -> Result<TokenKind, FunkyError> {
+        self.cursor
+            .eat_while(|c| c.is_alphanumeric() || c == '_' || c == '$');
+        let word = self.cursor.slice_from(start);
+        match self.cursor.peek() {
+            Some('"') if is_str_prefix(word) => {
+                let is_raw = word.contains('R');
+                self.cursor.advance();
+                if is_raw {
+                    self.scan_raw_string(line, col)?;
+                } else {
+                    self.scan_string_content(false)?;
+                }
+                Ok(TokenKind::LitStr)
+            }
+            Some('\'') if is_char_prefix(word) => {
+                self.cursor.advance();
+                self.scan_char_content(line, col)?;
+                Ok(TokenKind::LitChar)
+            }
+            _ => Ok(keyword_kind(word).unwrap_or(TokenKind::Ident)),
+        }
     }
 
     // ── Scan helpers ─────────────────────────────────────────────────────────

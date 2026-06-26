@@ -1,4 +1,6 @@
-use crate::config::{AlignCmtStyle, BraceStyle, Config, ExternCBrace, IndentStyle, PointerAlign, SpaceOption};
+use crate::config::{
+    AlignCmtStyle, BraceStyle, Config, ExternCBrace, IndentStyle, PointerAlign, SpaceOption,
+};
 use crate::error::FunkyError;
 use crate::token::{Span, Token, TokenKind};
 
@@ -41,7 +43,10 @@ fn inj_stmt_has_preproc(tokens: &[Token<'_>], from: usize) -> bool {
     while i < tokens.len()
         && matches!(
             tokens[i].kind,
-            TokenKind::Whitespace | TokenKind::Newline | TokenKind::CommentBlock | TokenKind::CommentLine
+            TokenKind::Whitespace
+                | TokenKind::Newline
+                | TokenKind::CommentBlock
+                | TokenKind::CommentLine
         )
     {
         i += 1;
@@ -2047,14 +2052,977 @@ impl<'src> Fmt<'src> {
         // `4WAY_HANDSHAKE_TIMEOUT` in a macro argument).  The lexer splits it
         // into LitInt + Ident; inserting a space would change the macro argument
         // and break token-pasting.  Preserve the original spacing.
-        if matches!(prev, TokenKind::LitInt | TokenKind::LitFloat)
-            && next == TokenKind::Ident
-        {
+        if matches!(prev, TokenKind::LitInt | TokenKind::LitFloat) && next == TokenKind::Ident {
             return self.src_had_inline_ws;
         }
 
         // Default: space between two identifier-like tokens
         true
+    }
+
+    // ── Token-type helpers called from the main format loop ──────────────────
+
+    fn reindent_block_comment_body(
+        &mut self,
+        normalized: String,
+        nl: &str,
+        was_at_line_start: bool,
+        target_indent_col: usize,
+    ) -> String {
+        if !was_at_line_start || !normalized.contains(nl) {
+            return normalized;
+        }
+        let tab_w = self.config.indent.width as usize;
+        let use_spaces = self.config.indent.style == IndentStyle::Spaces;
+        let measure_ws = |s: &str| -> usize {
+            if use_spaces {
+                s.chars().map(|c| if c == '\t' { tab_w } else { 1 }).sum()
+            } else {
+                s.chars().count()
+            }
+        };
+        let target: i64 = if use_spaces {
+            target_indent_col as i64
+        } else {
+            self.indent_level as i64
+        };
+        let orig_indent: i64 = {
+            let comment_idx = self.pos - 1;
+            let mut ws_lexeme = "";
+            let mut j = comment_idx;
+            while j > 0 {
+                j -= 1;
+                match self.tokens[j].kind {
+                    TokenKind::Whitespace => {
+                        ws_lexeme = self.tokens[j].lexeme;
+                        break;
+                    }
+                    TokenKind::Newline => break,
+                    _ => {}
+                }
+            }
+            measure_ws(ws_lexeme) as i64
+        };
+        let delta: i64 = target - orig_indent;
+        let lines: Vec<&str> = normalized.split(nl).collect();
+        let mut out = String::with_capacity(normalized.len() + 16);
+        for (i, line) in lines.iter().enumerate() {
+            if i > 0 {
+                out.push_str(nl);
+                let own_ws = line.len() - line.trim_start().len();
+                let shifted = ((own_ws as i64) + delta).max(0) as usize;
+                // When the `/*` didn't move (delta==0), ensure continuation lines
+                // at or below the `/*` column land at target+1 so content is
+                // visually inside the opener (uncrustify cmt_indent_multi).
+                // When delta!=0, the `/*` was shifted — keep proportional alignment.
+                let new_ws = if delta == 0 && (own_ws as i64) <= orig_indent && target > 0 {
+                    shifted.max(target as usize + 1)
+                } else {
+                    shifted
+                };
+                let trimmed = line.trim_start();
+                if !trimmed.is_empty() {
+                    if use_spaces {
+                        for _ in 0..new_ws {
+                            out.push(' ');
+                        }
+                    } else {
+                        let tabs = (self.indent_level as usize).min(new_ws);
+                        for _ in 0..tabs {
+                            out.push('\t');
+                        }
+                        for _ in 0..new_ws.saturating_sub(tabs) {
+                            out.push(' ');
+                        }
+                    }
+                    out.push_str(trimmed);
+                }
+            } else {
+                out.push_str(line);
+            }
+        }
+        out
+    }
+
+    fn fmt_rparen(&mut self) {
+        self.flush_blank_lines();
+        if self.at_line_start {
+            self.align_to_paren();
+        } else {
+            let want = match self.config.spacing.space_inside_parens {
+                SpaceOption::Add => true,
+                SpaceOption::Remove => false,
+                SpaceOption::Preserve => self.src_had_inline_ws,
+            };
+            if want {
+                self.space();
+            }
+        }
+        self.write(")");
+        self.paren_depth = self.paren_depth.saturating_sub(1);
+        self.paren_col_stack.pop();
+        self.paren_eol_stack.pop();
+        let is_cast_close = self.cast_paren_stack.pop().unwrap_or(false);
+        // A pointer declarator `*`/`&` immediately before `)` (e.g.
+        // `sizeof(char *)`) sets suppress_next_space, but that flag
+        // must not leak out of the closing paren into subsequent tokens.
+        self.suppress_next_space = false;
+        self.prev = Some(TokenKind::RParen);
+        self.last_was_template_close = false;
+        self.last_was_cast_close = is_cast_close;
+    }
+
+    fn fmt_unary_binary(&mut self, tok: &Token<'src>) {
+        self.flush_blank_lines();
+        // At line start the operator is always unary, never binary — even
+        // if the previous emitted token was a CommentBlock (ends_expr()).
+        // After a cast-close `)`, * and & are always unary.
+        let is_binary = !self.at_line_start
+            && !self.last_was_cast_close
+            && self.prev.is_some_and(|p| p.ends_expr());
+        if self.at_line_start {
+            self.indent();
+        } else if self.needs_space(tok.kind) {
+            self.space();
+        }
+        if !is_binary {
+            self.suppress_next_space = true;
+        }
+        self.write(tok.lexeme);
+        self.set_prev(tok.kind);
+    }
+
+    fn fmt_comma(&mut self, tok: &Token<'src>) {
+        self.flush_blank_lines();
+        if self.at_line_start {
+            self.indent();
+        }
+        self.write(",");
+        if self.paren_depth == 0 && self.bracket_depth == 0 {
+            self.assign_col = None;
+        }
+        if self.large_init_stack.last() == Some(&true) && self.paren_depth == 0 {
+            if self.peek_inline_line_comment(tok.span.line) {
+                // nothing — CommentLine will emit the trailing \n
+            } else {
+                self.nl();
+                self.skip_next_newline = true;
+            }
+        }
+        self.set_prev(TokenKind::Comma);
+    }
+
+    fn fmt_semi(&mut self, tok: &Token<'src>) {
+        self.flush_blank_lines();
+        self.pending_type = false;
+        self.pending_extern_c = false;
+        self.write(";");
+        // Don't emit newline if we're inside parens (for-loop header).
+        if self.paren_depth == 0 {
+            self.assign_col = None;
+            // If a trailing inline comment follows on the same source
+            // line, let the CommentLine handler close the line instead.
+            if self.peek_inline_comment(tok.span.line) {
+                // nothing — CommentLine will emit the trailing \n
+            } else {
+                self.nl();
+                self.skip_next_newline = true;
+            }
+            // Signal that the next token starts a new statement so the
+            // var-decl-block state machine can evaluate it.
+            if self.in_var_decl_block {
+                let top = self.brace_stack.last();
+                let is_func_top = top == Some(&BraceCtx::Function)
+                    || (top == Some(&BraceCtx::Block) && self.brace_stack.len() == 1);
+                if is_func_top {
+                    self.at_func_stmt_start = true;
+                }
+            }
+        }
+        self.set_prev(TokenKind::Semi);
+    }
+
+    fn fmt_lparen(&mut self) {
+        self.flush_blank_lines();
+        let is_cast = self.next_is_type_kw()
+            && !self.prev_is_sizeof_like()
+            && !self.prev.is_some_and(|p| p.is_control_kw());
+        self.cast_paren_stack.push(is_cast);
+        if self.at_line_start {
+            self.indent();
+        } else if self.needs_space(TokenKind::LParen) {
+            self.space();
+        } else if self.next_is_fn_ptr_declarator()
+            && matches!(
+                self.prev,
+                Some(TokenKind::Keyword | TokenKind::Ident | TokenKind::RParen)
+            )
+        {
+            // function-pointer declarator: `void (*Fn)(...)` needs space before `(`
+            self.space();
+        }
+        self.write("(");
+        self.paren_depth += 1;
+        // When space_inside_parens is Add (or Preserve with source space),
+        // the first argument starts one column later; include that offset
+        // so continuation lines align with it rather than the bare `(`.
+        let extra = match self.config.spacing.space_inside_parens {
+            SpaceOption::Add => 1,
+            SpaceOption::Remove => 0,
+            SpaceOption::Preserve => usize::from(matches!(
+                self.tokens.get(self.pos),
+                Some(t) if t.kind == TokenKind::Whitespace
+            )),
+        };
+        self.paren_col_stack.push(self.current_col + extra);
+        let indent_width = self.config.indent.width as usize;
+        let parens_on_line = (self.paren_depth - self.line_start_paren_depth) as usize;
+        let eol_col = self.line_indent_col + parens_on_line * indent_width;
+        self.paren_eol_stack.push((false, eol_col));
+        self.set_prev(TokenKind::LParen);
+    }
+
+    fn fmt_ptr_decl(&mut self, tok: &Token<'src>) {
+        self.flush_blank_lines();
+        match self.config.spacing.pointer_align {
+            PointerAlign::Middle => {
+                if self.at_line_start {
+                    self.indent();
+                } else if self.needs_space(tok.kind) {
+                    self.space();
+                }
+            }
+            PointerAlign::Type => {
+                if self.at_line_start {
+                    self.indent();
+                }
+            }
+            PointerAlign::Name => {
+                if self.at_line_start {
+                    self.indent();
+                } else if !matches!(self.prev, Some(TokenKind::Star | TokenKind::Amp)) {
+                    self.space();
+                }
+                self.suppress_next_space = true;
+            }
+        }
+        self.write(tok.lexeme);
+        self.set_prev(tok.kind);
+    }
+
+    fn fmt_kw_case_default(&mut self, tok: &Token<'src>) {
+        self.flush_blank_lines();
+        if self.at_line_start {
+            if self.config.indent.indent_switch_case {
+                // Undo any prior case-body extra indent, then print
+                // at the switch-body level (no additional dedent).
+                if let Some(active) = self.case_body_stack.last_mut() {
+                    if *active {
+                        self.indent_level = self.indent_level.saturating_sub(1);
+                        *active = false;
+                    }
+                }
+                self.indent();
+            } else {
+                // Dedent one level relative to the switch body.
+                let saved = self.indent_level;
+                if self.switch_depth > 0 && self.indent_level > 0 {
+                    self.indent_level -= 1;
+                }
+                self.indent();
+                self.indent_level = saved;
+            }
+        } else if self.needs_space(tok.kind) {
+            self.space();
+        }
+        self.in_case_label = true;
+        self.write(tok.lexeme);
+        self.set_prev(tok.kind);
+    }
+
+    fn fmt_assign_op(&mut self, tok: &Token<'src>) {
+        self.flush_blank_lines();
+        if self.at_line_start {
+            self.indent();
+        } else if self.needs_space(tok.kind) {
+            self.space();
+        }
+        self.write(tok.lexeme);
+        if self.paren_depth == 0 && self.bracket_depth == 0 && self.assign_col.is_none() {
+            let space = usize::from(self.config.spacing.space_around_binary_ops);
+            self.assign_col = Some(self.current_col + space);
+            self.assign_eol = false;
+        }
+        self.set_prev(tok.kind);
+    }
+
+    fn fmt_comment_line(&mut self, tok: &Token<'src>) {
+        let can_merge = self.config.newlines.merge_line_comment
+            && self.at_line_start
+            && self.blank_lines == 0
+            && matches!(
+                self.prev,
+                Some(TokenKind::LBrace | TokenKind::RBrace | TokenKind::Semi)
+            );
+        self.flush_blank_lines();
+        if can_merge {
+            self.trim_to_prev_line_end();
+        }
+        if !self.at_line_start {
+            self.space();
+        } else if tok.span.col > 1 {
+            self.indent();
+        }
+        let body = tok.lexeme.trim_end_matches(['\n', '\r']);
+        self.write(body);
+        self.nl();
+        self.set_prev(TokenKind::CommentLine);
+    }
+
+    fn fmt_rbrace(&mut self, tok: &Token<'src>) {
+        let closing_ctx = self.brace_stack.last().copied().unwrap_or(BraceCtx::Other);
+        // When indent_switch_case is on, an active case body adds an
+        // extra indent level that must be unwound before the `}`.
+        if closing_ctx == BraceCtx::Switch && self.config.indent.indent_switch_case {
+            if let Some(true) = self.case_body_stack.last() {
+                self.indent_level = self.indent_level.saturating_sub(1);
+            }
+            self.case_body_stack.pop();
+        }
+        if closing_ctx != BraceCtx::ExternC && self.indent_level > 0 {
+            self.indent_level -= 1;
+        }
+        // An `=` inside the brace body (e.g. the last enum value without a
+        // trailing comma) leaves assign_col set. Clear it so `indent()` uses
+        // normal indentation rather than aligning to the `=` column.
+        self.assign_col = None;
+        self.flush_blank_lines();
+        self.ensure_own_line();
+        self.write("}");
+
+        let ctx = self.brace_stack.pop().unwrap_or(BraceCtx::Other);
+        self.large_init_stack.pop();
+
+        if ctx == BraceCtx::Switch {
+            self.switch_depth = self.switch_depth.saturating_sub(1);
+        }
+        if ctx == BraceCtx::Type {
+            self.class_depth = self.class_depth.saturating_sub(1);
+        }
+        // brace_stack was already popped; a Block that left the stack
+        // empty was a top-level macro-function body (see LBrace logic).
+        let was_func_like =
+            ctx == BraceCtx::Function || (ctx == BraceCtx::Block && self.brace_stack.is_empty());
+        if was_func_like {
+            self.in_var_decl_block = false;
+            self.at_func_stmt_start = false;
+            self.force_blank_after_decls = false;
+        }
+
+        // Semicolon required after type definitions and namespace
+        let needs_semi = matches!(ctx, BraceCtx::Type);
+
+        // Peek: is the next token `;`?
+        let mut look = self.pos;
+        while look < self.tokens.len()
+            && matches!(
+                self.tokens[look].kind,
+                TokenKind::Whitespace | TokenKind::Newline
+            )
+        {
+            look += 1;
+        }
+        let next_kind = self.tokens.get(look).map(|t| t.kind);
+
+        if needs_semi && next_kind != Some(TokenKind::Semi) {
+            // The struct/class/enum definition has no trailing `;` —
+            // we must not add one ourselves (the source might be a forward
+            // decl without one, which is fine). Just emit the brace.
+        }
+
+        self.emit_post_brace_spacing(ctx, next_kind, tok.span.line);
+        self.set_prev(TokenKind::RBrace);
+    }
+
+    fn fmt_colon(&mut self) {
+        self.flush_blank_lines();
+        // Ternary `:` gets a space before it; case/label/access/goto do not.
+        if self.ternary_depth > 0
+            && !self.in_case_label
+            && !self.in_access_label
+            && !self.in_goto_label
+        {
+            self.ternary_depth = self.ternary_depth.saturating_sub(1);
+            if !self.at_line_start {
+                self.space();
+            }
+        } else if !self.in_case_label
+            && !self.in_access_label
+            && !self.in_goto_label
+            && self.prev == Some(TokenKind::Ident)
+            && self.peek_non_ws_kind() == Some(TokenKind::LitInt)
+            && self
+                .brace_stack
+                .last()
+                .is_some_and(|ctx| *ctx == BraceCtx::Type)
+        {
+            // Bitfield colon: `field:N` → `field : N`
+            if !self.at_line_start {
+                self.space();
+            }
+        }
+        self.write(":");
+        let is_case_colon = self.in_case_label;
+        if self.in_case_label {
+            self.in_case_label = false;
+            self.nl();
+            self.skip_next_newline = true;
+            if self.config.indent.indent_switch_case {
+                self.indent_level += 1;
+                if let Some(active) = self.case_body_stack.last_mut() {
+                    *active = true;
+                }
+            }
+        } else if self.in_access_label {
+            self.in_access_label = false;
+            self.nl();
+            self.skip_next_newline = true;
+        } else if self.in_goto_label {
+            self.in_goto_label = false;
+            self.nl();
+            self.skip_next_newline = true;
+        }
+        self.set_prev(TokenKind::Colon);
+        // Set AFTER set_prev() so set_prev() doesn't clear it.
+        self.last_was_case_colon = is_case_colon;
+    }
+
+    fn fmt_preproc_line(&mut self, tok: &Token<'src>) {
+        self.flush_blank_lines();
+        if !self.at_line_start {
+            self.nl();
+        }
+        // Normalize line endings in the directive.
+        let normalized = tok.lexeme.replace("\r\n", "\n").replace('\r', "\n");
+        let nl = self.config.newline_str();
+        let normalized = normalized.replace('\n', nl);
+
+        // Classify the directive (always, not just when pp_indent is on).
+        let directive: String = normalized
+            .trim_start()
+            .strip_prefix('#')
+            .and_then(|s| s.split_whitespace().next())
+            .unwrap_or("")
+            .to_string();
+        let directive = directive.as_str();
+        let is_open = matches!(directive, "if" | "ifdef" | "ifndef");
+        let is_close = directive == "endif";
+        let is_reopen = matches!(directive, "elif" | "else");
+
+        // Track code brace depth across #ifdef/#else/#endif so both
+        // branches start indenting from the same level.
+        if is_open {
+            self.pp_brace_stack.push(self.indent_level);
+        } else if is_reopen {
+            // Restore to the depth recorded at the opening #if so the
+            // else-branch starts with the same baseline.
+            if let Some(&saved) = self.pp_brace_stack.last() {
+                self.indent_level = saved;
+            }
+        } else if is_close {
+            // Pop without restoring — the last branch's accumulated
+            // depth is the correct post-#endif depth.
+            self.pp_brace_stack.pop();
+        }
+
+        // Normalize the number of spaces between `#endif` and a
+        // trailing `/*` comment.
+        let normalized = if is_close {
+            normalize_endif_spacing(&normalized, self.config.preprocessor.endif_comment_space)
+        } else {
+            normalized
+        };
+
+        // Apply space_around_binary_ops to #if / #elif conditions.
+        let normalized = if self.config.spacing.space_around_binary_ops
+            && (is_open || is_reopen)
+            && !matches!(directive, "ifdef" | "ifndef")
+        {
+            format_preproc_if_condition(&normalized, nl)
+        } else {
+            normalized
+        };
+
+        // Apply space_after_comma to #define bodies.
+        let normalized = if self.config.spacing.space_after_comma && directive == "define" {
+            add_space_after_comma(&normalized)
+        } else {
+            normalized
+        };
+
+        if self.config.preprocessor.pp_indent {
+            // #endif and #elif/#else dedent before emit.
+            if is_close || is_reopen {
+                self.pp_depth = self.pp_depth.saturating_sub(1);
+            }
+            let indent_str = self.config.indent_str().repeat(self.pp_depth as usize);
+            // Write depth-prefix before the `#`.
+            self.write(&indent_str);
+            self.write(normalized.trim_start());
+            // #if and #elif/#else increase depth after emit.
+            if is_open || is_reopen {
+                self.pp_depth += 1;
+            }
+        } else if self.config.preprocessor.pp_indent_at_level {
+            let leading = (tok.span.col as usize).saturating_sub(1);
+            if leading > 0 {
+                self.write(&" ".repeat(leading));
+            }
+            self.write(normalized.trim_start());
+        } else {
+            self.write(&normalized);
+        }
+
+        if !self.at_line_start {
+            self.nl();
+        }
+        self.set_prev(TokenKind::PreprocLine);
+    }
+
+    fn fmt_comment_block(&mut self, tok: &Token<'src>) {
+        self.flush_blank_lines();
+        let was_at_line_start = self.at_line_start;
+        if !was_at_line_start {
+            self.space();
+        } else {
+            self.indent();
+        }
+        let target_indent_col = self.line_indent_col;
+        // Normalize newlines in the block comment body.
+        let nl = self.config.newline_str();
+        let normalized = tok
+            .lexeme
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .replace('\n', nl);
+        // Ensure the closing `*/` has a leading space when it sits
+        // flush at the start of a line (e.g. `\n*/` → `\n */`).
+        // When the config option is enabled, rewrite a bare `*/`
+        // closing line to ` */` to match ` *`-continuation style.
+        // Exception: SQLite-style `**`-continuation comments already
+        // have `*/` at column 0 — don't add a spurious space there.
+        let uses_double_star = normalized
+            .split(nl)
+            .skip(1)
+            .any(|line| line.starts_with("**"));
+        let normalized = if self.config.comments.normalize_block_comment_closing
+            && !uses_double_star
+            && normalized.contains(&format!("{nl}*/"))
+        {
+            normalized.replace(&format!("{nl}*/"), &format!("{nl} */"))
+        } else {
+            normalized
+        };
+        // When indent style is spaces, expand leading tabs in
+        // continuation lines to spaces.  The leading whitespace
+        // before the `*` on each continuation line is indentation,
+        // not comment content, and should follow the indent style.
+        let normalized = if self.config.indent.style == IndentStyle::Spaces {
+            let tab_w = self.config.indent.width as usize;
+            let mut out = String::with_capacity(normalized.len());
+            let mut first = true;
+            for line in normalized.split(nl) {
+                if !first {
+                    out.push_str(nl);
+                }
+                first = false;
+                // Expand each leading tab to tab_w spaces.
+                let non_tab = line.trim_start_matches('\t');
+                let n_tabs = line.len() - non_tab.len();
+                for _ in 0..n_tabs * tab_w {
+                    out.push(' ');
+                }
+                out.push_str(non_tab);
+            }
+            out
+        } else {
+            normalized
+        };
+        // Strip trailing spaces from each line inside the comment.
+        let normalized = if normalized.contains(' ') || normalized.contains('\t') {
+            let mut out = String::with_capacity(normalized.len());
+            let mut first = true;
+            for line in normalized.split(nl) {
+                if !first {
+                    out.push_str(nl);
+                }
+                first = false;
+                out.push_str(line.trim_end());
+            }
+            out
+        } else {
+            normalized
+        };
+        // Re-indent continuation lines to match the column of `/*`.
+        // When `add_braces_to_if/while/for` shifts a comment to a
+        // deeper indent, the continuation lines in the lexeme still
+        // carry their original (shallower) whitespace prefix.
+        //
+        // Strategy: for each continuation line, compute a per-line
+        // delta = target_indent - orig_indent and apply it to the
+        // line's own leading whitespace.  This preserves style-
+        // alignment characters (e.g. the ` ` before `*` in standard
+        // ` * foo` style) while shifting the indent portion.
+        //
+        // All measurements are in the unit appropriate for the indent
+        // style:
+        //   Spaces — expanded-space count (tabs expanded to tab_w)
+        //   Tabs   — raw character count (tabs counted as 1)
+        //
+        // We walk backward past any injected synthetic tokens (e.g.
+        // a `{` from add_braces_to_while) to find the real Whitespace
+        // token that preceded `/*` in the source.
+        let normalized =
+            self.reindent_block_comment_body(normalized, nl, was_at_line_start, target_indent_col);
+        self.write(&normalized);
+        // If the comment ends the line (next source token is a
+        // Newline), emit the newline now and mark it consumed so
+        // skip_ws() doesn't double-count it as a blank line.
+        // CommentLine does this implicitly because its lexeme
+        // includes the trailing \n; CommentBlock does not.
+        if matches!(self.tokens.get(self.pos), Some(t) if t.kind == TokenKind::Newline) {
+            self.nl();
+            self.skip_next_newline = true;
+        }
+        self.set_prev(TokenKind::CommentBlock);
+    }
+
+    /// Returns `true` when the caller's loop should `continue` (token fully
+    /// consumed inline — e.g. a collapsed initializer or empty body).
+    fn fmt_lbrace(&mut self, tok: &Token<'src>) -> bool {
+        let ctx = self.infer_brace_ctx();
+        self.flush_blank_lines();
+
+        match ctx {
+            BraceCtx::Other => {
+                // Initializer list — stay on same line with a space
+                if self.needs_space(TokenKind::LBrace) {
+                    self.space();
+                }
+                self.write("{");
+
+                // Small initializer: keep entirely on one line.
+                // Large flat initializer: also keep on one line when
+                // expand_large_initializers is disabled (uncrustify default).
+                let inline_end = self.small_initializer_end().or_else(|| {
+                    if !self.config.braces.expand_large_initializers {
+                        self.large_flat_initializer_end()
+                    } else {
+                        None
+                    }
+                });
+                if let Some(end) = inline_end {
+                    let content: Vec<(&str, TokenKind)> = self.tokens[self.pos..end]
+                        .iter()
+                        .filter(|t| !matches!(t.kind, TokenKind::Whitespace | TokenKind::Newline))
+                        .map(|t| (t.lexeme, t.kind))
+                        .collect();
+                    self.write(&render_inline_init(&content));
+                    self.pos = end + 1;
+                    self.set_prev(TokenKind::RBrace);
+                    return true;
+                }
+            }
+            // extern "C" { } is a linkage specification. Placement is
+            // controlled by braces.extern_c_brace:
+            //   force_same_line — always K&R (Google/LLVM style)
+            //   preserve        — leave brace where source has it
+            BraceCtx::ExternC => {
+                match self.config.braces.extern_c_brace {
+                    ExternCBrace::ForceSameLine => {
+                        if self.at_line_start {
+                            self.trim_to_prev_line_end();
+                        }
+                        self.space();
+                    }
+                    ExternCBrace::Preserve => {
+                        if self.at_line_start {
+                            // brace was already on its own line in source — keep it
+                        } else {
+                            self.space();
+                        }
+                    }
+                }
+                self.write("{");
+            }
+            _ => match self.config.braces.style {
+                BraceStyle::Allman => {
+                    self.ensure_own_line();
+                    self.write("{");
+                }
+                BraceStyle::Kr | BraceStyle::Stroustrup => {
+                    // fn_brace_newline: function-definition braces go on
+                    // their own line even in KR mode.  Control-flow
+                    // constructs (if/for/while/switch) always stay on the
+                    // same line.
+                    let fn_newline = ctx == BraceCtx::Function
+                        && self.config.braces.fn_brace_newline
+                        && !self.rparen_closes_ctrl_flow();
+                    if fn_newline {
+                        self.ensure_own_line();
+                    } else if self.at_line_start && self.prev == Some(TokenKind::PreprocLine) {
+                        // Never pull `{` onto a preprocessor directive line
+                        // (e.g. `else\n#endif\n{`). Keep it on its own line.
+                        self.indent();
+                    } else {
+                        if self.at_line_start {
+                            // Source had Allman-style brace; enforce KR.
+                            self.trim_to_prev_line_end();
+                        }
+                        self.space();
+                    }
+                    self.write("{");
+                }
+            },
+        }
+
+        // ── Empty-body collapse ───────────────────────────────────
+        // When collapse_empty_body is set and the only content between
+        // `{` and `}` is whitespace, emit `{}` on the same line.
+        if self.config.braces.collapse_empty_body {
+            let mut look = self.pos;
+            while look < self.tokens.len()
+                && matches!(
+                    self.tokens[look].kind,
+                    TokenKind::Whitespace | TokenKind::Newline
+                )
+            {
+                look += 1;
+            }
+            if self.tokens.get(look).map(|t| t.kind) == Some(TokenKind::RBrace) {
+                // Consume whitespace + the `}` token.
+                self.pos = look + 1;
+                self.write("}");
+
+                // Replicate the post-`}` newline/spacing decisions from
+                // the RBrace arm so callers see the same output shape.
+                let mut after = self.pos;
+                while after < self.tokens.len()
+                    && matches!(
+                        self.tokens[after].kind,
+                        TokenKind::Whitespace | TokenKind::Newline
+                    )
+                {
+                    after += 1;
+                }
+                let next_kind = self.tokens.get(after).map(|t| t.kind);
+
+                self.emit_post_brace_spacing(ctx, next_kind, tok.span.line);
+
+                self.pending_switch = false;
+                self.pending_type = false;
+                self.pending_extern_c = false;
+                self.set_prev(TokenKind::RBrace);
+                return true;
+            }
+        }
+
+        if ctx == BraceCtx::Switch {
+            self.switch_depth += 1;
+            self.case_body_stack.push(false);
+        }
+        if ctx == BraceCtx::Type {
+            self.class_depth += 1;
+        }
+        // A Block at global scope (brace_stack currently empty) is a
+        // macro-defined function body (e.g. SM_STATE(...) { ... }).
+        // Treat it like a Function for the var-decl blank-line rule.
+        let is_func_like =
+            ctx == BraceCtx::Function || (ctx == BraceCtx::Block && self.brace_stack.is_empty());
+        if is_func_like && self.config.newlines.blank_line_after_var_decl_block {
+            self.in_var_decl_block = true;
+            self.at_func_stmt_start = true;
+            self.saw_func_decl = false;
+        }
+        self.pending_switch = false;
+        self.pending_type = false;
+        self.pending_extern_c = false;
+        // `{` takes over indentation; = alignment no longer applies.
+        self.assign_col = None;
+        let is_large_init = ctx == BraceCtx::Other
+            && self.config.braces.expand_large_initializers
+            && self.large_flat_initializer_end().is_some();
+        self.brace_stack.push(ctx);
+        self.large_init_stack.push(is_large_init);
+        // `case X: {` — the case-label colon already incremented
+        // indent_level (via indent_switch_case). The block `{` should
+        // take over that indent slot rather than adding a new one, so the
+        // body sits at case_body_level + 1 (not + 2).
+        if ctx == BraceCtx::Block
+            && self.last_was_case_colon
+            && self.config.indent.indent_switch_case
+        {
+            // Undo the case-body indent; the block's own +1 below
+            // restores the same net level.
+            self.indent_level = self.indent_level.saturating_sub(1);
+            if let Some(active) = self.case_body_stack.last_mut() {
+                *active = false;
+            }
+        }
+        if ctx != BraceCtx::ExternC {
+            self.indent_level += 1;
+        }
+        self.nl();
+        self.skip_next_newline = true;
+        if self.config.newlines.blank_line_after_open_brace
+            && matches!(ctx, BraceCtx::Function | BraceCtx::Block)
+        {
+            self.blank_lines = self.blank_lines.max(1);
+        }
+        self.set_prev(TokenKind::LBrace);
+        false
+    }
+
+    fn fmt_line_continuation(&mut self, tok: &Token<'src>) {
+        self.flush_blank_lines();
+        if self.at_line_start {
+            self.indent();
+        } else if self.needs_space(tok.kind) {
+            self.space();
+        }
+        self.write(tok.lexeme);
+        // set_prev intentionally omitted — backslash is transparent.
+    }
+
+    fn fmt_lbracket(&mut self) {
+        self.flush_blank_lines();
+        self.write("[");
+        self.bracket_depth += 1;
+        self.set_prev(TokenKind::LBracket);
+    }
+
+    fn fmt_rbracket(&mut self) {
+        self.flush_blank_lines();
+        if !self.at_line_start {
+            let want = match self.config.spacing.space_inside_brackets {
+                SpaceOption::Add => true,
+                SpaceOption::Remove => false,
+                SpaceOption::Preserve => self.src_had_inline_ws,
+            };
+            if want {
+                self.space();
+            }
+        }
+        self.write("]");
+        self.bracket_depth = self.bracket_depth.saturating_sub(1);
+        self.set_prev(TokenKind::RBracket);
+    }
+
+    fn fmt_kw_switch(&mut self, tok: &Token<'src>) {
+        self.flush_blank_lines();
+        if self.at_line_start {
+            self.indent();
+        } else if self.needs_space(tok.kind) {
+            self.space();
+        }
+        self.pending_switch = true;
+        self.write(tok.lexeme);
+        self.set_prev(tok.kind);
+    }
+
+    fn fmt_access_specifier(&mut self, tok: &Token<'src>) {
+        self.flush_blank_lines();
+        if self.at_line_start && self.class_depth > 0 {
+            let saved = self.indent_level;
+            if self.indent_level > 0 {
+                self.indent_level -= 1;
+            }
+            self.indent();
+            self.indent_level = saved;
+            self.in_access_label = true;
+        } else if !self.at_line_start && self.needs_space(tok.kind) {
+            self.space();
+        }
+        self.write(tok.lexeme);
+        self.set_prev(tok.kind);
+    }
+
+    fn fmt_template_open(&mut self) {
+        self.flush_blank_lines();
+        if self.at_line_start {
+            self.indent();
+        }
+        self.write("<");
+        self.template_depth += 1;
+        if self.config.spacing.space_inside_angle_brackets {
+            self.space();
+        }
+        self.set_prev(TokenKind::Lt);
+    }
+
+    fn fmt_template_close_single(&mut self) {
+        self.flush_blank_lines();
+        if self.config.spacing.space_inside_angle_brackets && !self.at_line_start {
+            self.space();
+        } else if self.at_line_start {
+            self.indent();
+        }
+        self.write(">");
+        self.template_depth -= 1;
+        self.prev = Some(TokenKind::Gt);
+        self.last_was_template_close = true;
+    }
+
+    fn fmt_template_close_double(&mut self) {
+        self.flush_blank_lines();
+        if self.config.spacing.space_inside_angle_brackets && !self.at_line_start {
+            self.space();
+        } else if self.at_line_start {
+            self.indent();
+        }
+        self.write(">>");
+        self.template_depth -= 2;
+        self.prev = Some(TokenKind::Gt);
+        self.last_was_template_close = true;
+    }
+
+    fn fmt_type_kw(&mut self, tok: &Token<'src>) {
+        self.flush_blank_lines();
+        if self.at_line_start {
+            self.indent();
+        } else if self.needs_space(tok.kind) {
+            self.space();
+        }
+        self.pending_type = true;
+        self.write(tok.lexeme);
+        self.set_prev(tok.kind);
+    }
+
+    fn fmt_goto_label_ident(&mut self, tok: &Token<'src>) {
+        self.flush_blank_lines();
+        self.write(tok.lexeme);
+        self.in_goto_label = true;
+        self.set_prev(tok.kind);
+    }
+
+    fn fmt_default_token(&mut self, tok: &Token<'src>) {
+        self.flush_blank_lines();
+        if self.at_line_start {
+            self.indent();
+        } else if self.needs_space(tok.kind) {
+            self.space();
+        }
+        if !(tok.kind == TokenKind::LitStr && self.pending_extern_c) {
+            self.pending_extern_c = tok.kind == TokenKind::Keyword && tok.lexeme == "extern";
+        }
+        self.write(tok.lexeme);
+        self.set_prev(tok.kind);
+        if tok.kind == TokenKind::Keyword && tok.lexeme == "operator" {
+            self.after_operator_kw = true;
+        }
+        if tok.kind == TokenKind::Question {
+            self.ternary_depth += 1;
+        }
     }
 
     // ── Main format loop ──────────────────────────────────────────────────────
@@ -2079,887 +3047,76 @@ impl<'src> Fmt<'src> {
                 }
 
                 // ── Line continuation outside preprocessor ────────────────────
-                // `\` immediately before a newline in regular C/C++ code (phase-1
-                // splice).  Write it verbatim; the following Newline token handles
-                // the line break as usual.  Don't call set_prev so the token that
-                // precedes `\` remains as `prev` for the continuation line.
                 TokenKind::LineContinuation => {
-                    self.flush_blank_lines();
-                    if self.at_line_start {
-                        self.indent();
-                    } else if self.needs_space(tok.kind) {
-                        self.space();
-                    }
-                    self.write(tok.lexeme);
-                    // set_prev intentionally omitted — backslash is transparent.
+                    self.fmt_line_continuation(&tok);
                 }
 
                 // ── Preprocessor — pass through verbatim, normalized newlines ─
                 TokenKind::PreprocLine => {
-                    self.flush_blank_lines();
-                    if !self.at_line_start {
-                        self.nl();
-                    }
-                    // Normalize line endings in the directive.
-                    let normalized = tok.lexeme.replace("\r\n", "\n").replace('\r', "\n");
-                    let nl = self.config.newline_str();
-                    let normalized = normalized.replace('\n', nl);
-
-                    // Classify the directive (always, not just when pp_indent is on).
-                    let directive: String = normalized
-                        .trim_start()
-                        .strip_prefix('#')
-                        .and_then(|s| s.split_whitespace().next())
-                        .unwrap_or("")
-                        .to_string();
-                    let directive = directive.as_str();
-                    let is_open = matches!(directive, "if" | "ifdef" | "ifndef");
-                    let is_close = directive == "endif";
-                    let is_reopen = matches!(directive, "elif" | "else");
-
-                    // Track code brace depth across #ifdef/#else/#endif so both
-                    // branches start indenting from the same level.
-                    if is_open {
-                        self.pp_brace_stack.push(self.indent_level);
-                    } else if is_reopen {
-                        // Restore to the depth recorded at the opening #if so the
-                        // else-branch starts with the same baseline.
-                        if let Some(&saved) = self.pp_brace_stack.last() {
-                            self.indent_level = saved;
-                        }
-                    } else if is_close {
-                        // Pop without restoring — the last branch's accumulated
-                        // depth is the correct post-#endif depth.
-                        self.pp_brace_stack.pop();
-                    }
-
-                    // Normalize the number of spaces between `#endif` and a
-                    // trailing `/*` comment.
-                    let normalized = if is_close {
-                        normalize_endif_spacing(
-                            &normalized,
-                            self.config.preprocessor.endif_comment_space,
-                        )
-                    } else {
-                        normalized
-                    };
-
-                    // Apply space_around_binary_ops to #if / #elif conditions.
-                    let normalized = if self.config.spacing.space_around_binary_ops
-                        && (is_open || is_reopen)
-                        && !matches!(directive, "ifdef" | "ifndef")
-                    {
-                        format_preproc_if_condition(&normalized, nl)
-                    } else {
-                        normalized
-                    };
-
-                    // Apply space_after_comma to #define bodies.
-                    let normalized = if self.config.spacing.space_after_comma
-                        && directive == "define"
-                    {
-                        add_space_after_comma(&normalized)
-                    } else {
-                        normalized
-                    };
-
-                    if self.config.preprocessor.pp_indent {
-                        // #endif and #elif/#else dedent before emit.
-                        if is_close || is_reopen {
-                            self.pp_depth = self.pp_depth.saturating_sub(1);
-                        }
-                        let indent_str = self.config.indent_str().repeat(self.pp_depth as usize);
-                        // Write depth-prefix before the `#`.
-                        self.write(&indent_str);
-                        self.write(normalized.trim_start());
-                        // #if and #elif/#else increase depth after emit.
-                        if is_open || is_reopen {
-                            self.pp_depth += 1;
-                        }
-                    } else if self.config.preprocessor.pp_indent_at_level {
-                        let leading = (tok.span.col as usize).saturating_sub(1);
-                        if leading > 0 {
-                            self.write(&" ".repeat(leading));
-                        }
-                        self.write(normalized.trim_start());
-                    } else {
-                        self.write(&normalized);
-                    }
-
-                    if !self.at_line_start {
-                        self.nl();
-                    }
-                    self.set_prev(TokenKind::PreprocLine);
+                    self.fmt_preproc_line(&tok);
                 }
 
                 // ── Line comment ──────────────────────────────────────────────
                 TokenKind::CommentLine => {
-                    // Merge: a standalone comment with no blank lines before it
-                    // can be hoisted to the end of the preceding brace/statement
-                    // line when the config flag is set.
-                    let can_merge = self.config.newlines.merge_line_comment
-                        && self.at_line_start
-                        && self.blank_lines == 0
-                        && matches!(
-                            self.prev,
-                            Some(TokenKind::LBrace | TokenKind::RBrace | TokenKind::Semi)
-                        );
-                    self.flush_blank_lines();
-                    if can_merge {
-                        self.trim_to_prev_line_end();
-                    }
-                    if !self.at_line_start {
-                        self.space();
-                    } else if tok.span.col > 1 {
-                        self.indent();
-                    }
-                    // Emit comment with normalized line ending at the end.
-                    let body = tok.lexeme.trim_end_matches(['\n', '\r']);
-                    self.write(body);
-                    self.nl();
-                    self.set_prev(TokenKind::CommentLine);
+                    self.fmt_comment_line(&tok);
                 }
 
                 // ── Block comment ─────────────────────────────────────────────
                 TokenKind::CommentBlock => {
-                    self.flush_blank_lines();
-                    let was_at_line_start = self.at_line_start;
-                    if !was_at_line_start {
-                        self.space();
-                    } else {
-                        self.indent();
-                    }
-                    let target_indent_col = self.line_indent_col;
-                    // Normalize newlines in the block comment body.
-                    let nl = self.config.newline_str();
-                    let normalized = tok
-                        .lexeme
-                        .replace("\r\n", "\n")
-                        .replace('\r', "\n")
-                        .replace('\n', nl);
-                    // Ensure the closing `*/` has a leading space when it sits
-                    // flush at the start of a line (e.g. `\n*/` → `\n */`).
-                    // When the config option is enabled, rewrite a bare `*/`
-                    // closing line to ` */` to match ` *`-continuation style.
-                    // Exception: SQLite-style `**`-continuation comments already
-                    // have `*/` at column 0 — don't add a spurious space there.
-                    let uses_double_star = normalized
-                        .split(nl)
-                        .skip(1)
-                        .any(|line| line.starts_with("**"));
-                    let normalized = if self.config.comments.normalize_block_comment_closing
-                        && !uses_double_star
-                        && normalized.contains(&format!("{nl}*/"))
-                    {
-                        normalized.replace(&format!("{nl}*/"), &format!("{nl} */"))
-                    } else {
-                        normalized
-                    };
-                    // When indent style is spaces, expand leading tabs in
-                    // continuation lines to spaces.  The leading whitespace
-                    // before the `*` on each continuation line is indentation,
-                    // not comment content, and should follow the indent style.
-                    let normalized = if self.config.indent.style == IndentStyle::Spaces {
-                        let tab_w = self.config.indent.width as usize;
-                        let mut out = String::with_capacity(normalized.len());
-                        let mut first = true;
-                        for line in normalized.split(nl) {
-                            if !first {
-                                out.push_str(nl);
-                            }
-                            first = false;
-                            // Expand each leading tab to tab_w spaces.
-                            let non_tab = line.trim_start_matches('\t');
-                            let n_tabs = line.len() - non_tab.len();
-                            for _ in 0..n_tabs * tab_w {
-                                out.push(' ');
-                            }
-                            out.push_str(non_tab);
-                        }
-                        out
-                    } else {
-                        normalized
-                    };
-                    // Strip trailing spaces from each line inside the comment.
-                    let normalized = if normalized.contains(' ') || normalized.contains('\t') {
-                        let mut out = String::with_capacity(normalized.len());
-                        let mut first = true;
-                        for line in normalized.split(nl) {
-                            if !first {
-                                out.push_str(nl);
-                            }
-                            first = false;
-                            out.push_str(line.trim_end());
-                        }
-                        out
-                    } else {
-                        normalized
-                    };
-                    // Re-indent continuation lines to match the column of `/*`.
-                    // When `add_braces_to_if/while/for` shifts a comment to a
-                    // deeper indent, the continuation lines in the lexeme still
-                    // carry their original (shallower) whitespace prefix.
-                    //
-                    // Strategy: for each continuation line, compute a per-line
-                    // delta = target_indent - orig_indent and apply it to the
-                    // line's own leading whitespace.  This preserves style-
-                    // alignment characters (e.g. the ` ` before `*` in standard
-                    // ` * foo` style) while shifting the indent portion.
-                    //
-                    // All measurements are in the unit appropriate for the indent
-                    // style:
-                    //   Spaces — expanded-space count (tabs expanded to tab_w)
-                    //   Tabs   — raw character count (tabs counted as 1)
-                    //
-                    // We walk backward past any injected synthetic tokens (e.g.
-                    // a `{` from add_braces_to_while) to find the real Whitespace
-                    // token that preceded `/*` in the source.
-                    let normalized = if was_at_line_start && normalized.contains(nl) {
-                        let tab_w = self.config.indent.width as usize;
-                        let use_spaces = self.config.indent.style == IndentStyle::Spaces;
-                        // Measure a whitespace string in the current unit.
-                        let measure_ws = |s: &str| -> usize {
-                            if use_spaces {
-                                s.chars().map(|c| if c == '\t' { tab_w } else { 1 }).sum()
-                            } else {
-                                s.chars().count()
-                            }
-                        };
-                        // Target indent in the current unit.
-                        let target: i64 = if use_spaces {
-                            target_indent_col as i64
-                        } else {
-                            self.indent_level as i64
-                        };
-                        // Original indent of `/*` from the preceding Whitespace token.
-                        let orig_indent: i64 = {
-                            let comment_idx = self.pos - 1;
-                            let mut ws_lexeme = "";
-                            let mut j = comment_idx;
-                            while j > 0 {
-                                j -= 1;
-                                match self.tokens[j].kind {
-                                    TokenKind::Whitespace => {
-                                        ws_lexeme = self.tokens[j].lexeme;
-                                        break;
-                                    }
-                                    TokenKind::Newline => break,
-                                    _ => {}
-                                }
-                            }
-                            measure_ws(ws_lexeme) as i64
-                        };
-                        let delta: i64 = target - orig_indent;
-                        let lines: Vec<&str> = normalized.split(nl).collect();
-                        let mut out = String::with_capacity(normalized.len() + 16);
-                        for (i, line) in lines.iter().enumerate() {
-                            if i > 0 {
-                                out.push_str(nl);
-                                let own_ws = line.len() - line.trim_start().len();
-                                let shifted = ((own_ws as i64) + delta).max(0) as usize;
-                                // When the `/*` didn't move (delta==0), ensure lines at
-                                // or below the `/*` column land at target+1 so content
-                                // is visually inside the opener (uncrustify cmt_indent_multi).
-                                // When delta!=0, the `/*` was shifted by add_braces or
-                                // similar — keep proportional alignment, don't add +1.
-                                let new_ws = if delta == 0
-                                    && (own_ws as i64) <= orig_indent
-                                    && target > 0
-                                {
-                                    shifted.max(target as usize + 1)
-                                } else {
-                                    shifted
-                                };
-                                // Build new prefix: indent_level tabs/spaces + any
-                                // remaining style-alignment spaces. Blank lines
-                                // inside block comments get no trailing whitespace.
-                                let trimmed = line.trim_start();
-                                if !trimmed.is_empty() {
-                                    if use_spaces {
-                                        for _ in 0..new_ws {
-                                            out.push(' ');
-                                        }
-                                    } else {
-                                        let tabs = (self.indent_level as usize).min(new_ws);
-                                        for _ in 0..tabs {
-                                            out.push('\t');
-                                        }
-                                        for _ in 0..new_ws.saturating_sub(tabs) {
-                                            out.push(' ');
-                                        }
-                                    }
-                                    out.push_str(trimmed);
-                                }
-                            } else {
-                                out.push_str(line);
-                            }
-                        }
-                        out
-                    } else {
-                        normalized
-                    };
-                    self.write(&normalized);
-                    // If the comment ends the line (next source token is a
-                    // Newline), emit the newline now and mark it consumed so
-                    // skip_ws() doesn't double-count it as a blank line.
-                    // CommentLine does this implicitly because its lexeme
-                    // includes the trailing \n; CommentBlock does not.
-                    if matches!(self.tokens.get(self.pos), Some(t) if t.kind == TokenKind::Newline) {
-                        self.nl();
-                        self.skip_next_newline = true;
-                    }
-                    self.set_prev(TokenKind::CommentBlock);
+                    self.fmt_comment_block(&tok);
                 }
 
                 // ── Opening brace ─────────────────────────────────────────────
                 TokenKind::LBrace => {
-                    let ctx = self.infer_brace_ctx();
-                    self.flush_blank_lines();
-
-                    match ctx {
-                        BraceCtx::Other => {
-                            // Initializer list — stay on same line with a space
-                            if self.needs_space(TokenKind::LBrace) {
-                                self.space();
-                            }
-                            self.write("{");
-
-                            // Small initializer: keep entirely on one line.
-                            // Large flat initializer: also keep on one line when
-                            // expand_large_initializers is disabled (uncrustify default).
-                            let inline_end = self.small_initializer_end().or_else(|| {
-                                if !self.config.braces.expand_large_initializers {
-                                    self.large_flat_initializer_end()
-                                } else {
-                                    None
-                                }
-                            });
-                            if let Some(end) = inline_end {
-                                let content: Vec<(&str, TokenKind)> = self.tokens[self.pos..end]
-                                    .iter()
-                                    .filter(|t| {
-                                        !matches!(
-                                            t.kind,
-                                            TokenKind::Whitespace | TokenKind::Newline
-                                        )
-                                    })
-                                    .map(|t| (t.lexeme, t.kind))
-                                    .collect();
-
-                                if content.is_empty() {
-                                    self.write("}");
-                                } else {
-                                    self.write(" ");
-                                    let mut prev_kind = TokenKind::LBrace;
-                                    let mut suppress = false;
-                                    for (lex, kind) in content.iter() {
-                                        // No space before . or -> only when it's member
-                                        // access (prev ends an expression). Designated
-                                        // initializer .field comes after , or { and
-                                        // does need a space.
-                                        let need_space = !(suppress
-                                            || matches!(
-                                                kind,
-                                                TokenKind::Comma | TokenKind::RParen
-                                            )
-                                            || matches!(
-                                                prev_kind,
-                                                TokenKind::LBrace
-                                                    | TokenKind::Dot
-                                                    | TokenKind::Arrow
-                                                    | TokenKind::LParen
-                                            )
-                                            || matches!(kind, TokenKind::Dot | TokenKind::Arrow)
-                                                && prev_kind.ends_expr()
-                                            || matches!(kind, TokenKind::LParen)
-                                                && prev_kind.ends_expr());
-                                        if need_space {
-                                            self.write(" ");
-                                        }
-                                        suppress = false;
-                                        self.write(lex);
-                                        // Unary context: after any non-expression-ending
-                                        // token (=, comma, {, (, etc.), - + * & are unary
-                                        // — suppress space between operator and operand.
-                                        if matches!(
-                                            kind,
-                                            TokenKind::Minus
-                                                | TokenKind::Plus
-                                                | TokenKind::Star
-                                                | TokenKind::Amp
-                                        ) && !prev_kind.ends_expr()
-                                        {
-                                            suppress = true;
-                                        }
-                                        prev_kind = *kind;
-                                    }
-                                    self.write(" }");
-                                }
-                                self.pos = end + 1;
-                                self.set_prev(TokenKind::RBrace);
-                                continue;
-                            }
-
-                        }
-                        // extern "C" { } is a linkage specification. Placement is
-                        // controlled by braces.extern_c_brace:
-                        //   force_same_line — always K&R (Google/LLVM style)
-                        //   preserve        — leave brace where source has it
-                        BraceCtx::ExternC => {
-                            match self.config.braces.extern_c_brace {
-                                ExternCBrace::ForceSameLine => {
-                                    if self.at_line_start {
-                                        self.trim_to_prev_line_end();
-                                    }
-                                    self.space();
-                                }
-                                ExternCBrace::Preserve => {
-                                    if self.at_line_start {
-                                        // brace was already on its own line in source — keep it
-                                    } else {
-                                        self.space();
-                                    }
-                                }
-                            }
-                            self.write("{");
-                        }
-                        _ => match self.config.braces.style {
-                            BraceStyle::Allman => {
-                                self.ensure_own_line();
-                                self.write("{");
-                            }
-                            BraceStyle::Kr | BraceStyle::Stroustrup => {
-                                // fn_brace_newline: function-definition braces go on
-                                // their own line even in KR mode.  Control-flow
-                                // constructs (if/for/while/switch) always stay on the
-                                // same line.
-                                let fn_newline = ctx == BraceCtx::Function
-                                    && self.config.braces.fn_brace_newline
-                                    && !self.rparen_closes_ctrl_flow();
-                                if fn_newline {
-                                    self.ensure_own_line();
-                                } else if self.at_line_start
-                                    && self.prev == Some(TokenKind::PreprocLine)
-                                {
-                                    // Never pull `{` onto a preprocessor directive line
-                                    // (e.g. `else\n#endif\n{`). Keep it on its own line.
-                                    self.indent();
-                                } else {
-                                    if self.at_line_start {
-                                        // Source had Allman-style brace; enforce KR.
-                                        self.trim_to_prev_line_end();
-                                    }
-                                    self.space();
-                                }
-                                self.write("{");
-                            }
-                        },
+                    if self.fmt_lbrace(&tok) {
+                        continue;
                     }
-
-                    // ── Empty-body collapse ───────────────────────────────────
-                    // When collapse_empty_body is set and the only content between
-                    // `{` and `}` is whitespace, emit `{}` on the same line.
-                    if self.config.braces.collapse_empty_body {
-                        let mut look = self.pos;
-                        while look < self.tokens.len()
-                            && matches!(
-                                self.tokens[look].kind,
-                                TokenKind::Whitespace | TokenKind::Newline
-                            )
-                        {
-                            look += 1;
-                        }
-                        if self.tokens.get(look).map(|t| t.kind) == Some(TokenKind::RBrace) {
-                            // Consume whitespace + the `}` token.
-                            self.pos = look + 1;
-                            self.write("}");
-
-                            // Replicate the post-`}` newline/spacing decisions from
-                            // the RBrace arm so callers see the same output shape.
-                            let mut after = self.pos;
-                            while after < self.tokens.len()
-                                && matches!(
-                                    self.tokens[after].kind,
-                                    TokenKind::Whitespace | TokenKind::Newline
-                                )
-                            {
-                                after += 1;
-                            }
-                            let next_kind = self.tokens.get(after).map(|t| t.kind);
-
-                            self.emit_post_brace_spacing(ctx, next_kind, tok.span.line);
-
-                            self.pending_switch = false;
-                            self.pending_type = false;
-                            self.pending_extern_c = false;
-                            self.set_prev(TokenKind::RBrace);
-                            continue;
-                        }
-                    }
-
-                    if ctx == BraceCtx::Switch {
-                        self.switch_depth += 1;
-                        self.case_body_stack.push(false);
-                    }
-                    if ctx == BraceCtx::Type {
-                        self.class_depth += 1;
-                    }
-                    // A Block at global scope (brace_stack currently empty) is a
-                    // macro-defined function body (e.g. SM_STATE(...) { ... }).
-                    // Treat it like a Function for the var-decl blank-line rule.
-                    let is_func_like = ctx == BraceCtx::Function
-                        || (ctx == BraceCtx::Block && self.brace_stack.is_empty());
-                    if is_func_like && self.config.newlines.blank_line_after_var_decl_block {
-                        self.in_var_decl_block = true;
-                        self.at_func_stmt_start = true;
-                        self.saw_func_decl = false;
-                    }
-                    self.pending_switch = false;
-                    self.pending_type = false;
-                    self.pending_extern_c = false;
-                    // `{` takes over indentation; = alignment no longer applies.
-                    self.assign_col = None;
-                    let is_large_init = ctx == BraceCtx::Other
-                        && self.config.braces.expand_large_initializers
-                        && self.large_flat_initializer_end().is_some();
-                    self.brace_stack.push(ctx);
-                    self.large_init_stack.push(is_large_init);
-                    // `case X: {` — the case-label colon already incremented
-                    // indent_level (via indent_switch_case). The block `{` should
-                    // take over that indent slot rather than adding a new one, so the
-                    // body sits at case_body_level + 1 (not + 2).
-                    if ctx == BraceCtx::Block
-                        && self.last_was_case_colon
-                        && self.config.indent.indent_switch_case
-                    {
-                        // Undo the case-body indent; the block's own +1 below
-                        // restores the same net level.
-                        self.indent_level = self.indent_level.saturating_sub(1);
-                        if let Some(active) = self.case_body_stack.last_mut() {
-                            *active = false;
-                        }
-                    }
-                    if ctx != BraceCtx::ExternC {
-                        self.indent_level += 1;
-                    }
-                    self.nl();
-                    self.skip_next_newline = true;
-                    if self.config.newlines.blank_line_after_open_brace
-                        && matches!(ctx, BraceCtx::Function | BraceCtx::Block)
-                    {
-                        self.blank_lines = self.blank_lines.max(1);
-                    }
-                    self.set_prev(TokenKind::LBrace);
                 }
 
                 // ── Closing brace ─────────────────────────────────────────────
                 TokenKind::RBrace => {
-                    let closing_ctx = self.brace_stack.last().copied().unwrap_or(BraceCtx::Other);
-                    // When indent_switch_case is on, an active case body adds an
-                    // extra indent level that must be unwound before the `}`.
-                    if closing_ctx == BraceCtx::Switch && self.config.indent.indent_switch_case {
-                        if let Some(true) = self.case_body_stack.last() {
-                            self.indent_level = self.indent_level.saturating_sub(1);
-                        }
-                        self.case_body_stack.pop();
-                    }
-                    if closing_ctx != BraceCtx::ExternC && self.indent_level > 0 {
-                        self.indent_level -= 1;
-                    }
-                    // An `=` inside the brace body (e.g. the last enum value without a
-                    // trailing comma) leaves assign_col set. Clear it so `indent()` uses
-                    // normal indentation rather than aligning to the `=` column.
-                    self.assign_col = None;
-                    self.flush_blank_lines();
-                    self.ensure_own_line();
-                    self.write("}");
-
-                    let ctx = self.brace_stack.pop().unwrap_or(BraceCtx::Other);
-                    self.large_init_stack.pop();
-
-                    if ctx == BraceCtx::Switch {
-                        self.switch_depth = self.switch_depth.saturating_sub(1);
-                    }
-                    if ctx == BraceCtx::Type {
-                        self.class_depth = self.class_depth.saturating_sub(1);
-                    }
-                    // brace_stack was already popped; a Block that left the stack
-                    // empty was a top-level macro-function body (see LBrace logic).
-                    let was_func_like = ctx == BraceCtx::Function
-                        || (ctx == BraceCtx::Block && self.brace_stack.is_empty());
-                    if was_func_like {
-                        self.in_var_decl_block = false;
-                        self.at_func_stmt_start = false;
-                        self.force_blank_after_decls = false;
-                    }
-
-                    // Semicolon required after type definitions and namespace
-                    let needs_semi = matches!(ctx, BraceCtx::Type);
-
-                    // Peek: is the next token `;`?
-                    let mut look = self.pos;
-                    while look < self.tokens.len()
-                        && matches!(
-                            self.tokens[look].kind,
-                            TokenKind::Whitespace | TokenKind::Newline
-                        )
-                    {
-                        look += 1;
-                    }
-                    let next_kind = self.tokens.get(look).map(|t| t.kind);
-
-                    if needs_semi && next_kind != Some(TokenKind::Semi) {
-                        // The struct/class/enum definition has no trailing `;` —
-                        // we must not add one ourselves (the source might be a forward
-                        // decl without one, which is fine). Just emit the brace.
-                    }
-
-                    self.emit_post_brace_spacing(ctx, next_kind, tok.span.line);
-
-                    self.set_prev(TokenKind::RBrace);
+                    self.fmt_rbrace(&tok);
                 }
 
                 // ── Semicolon ─────────────────────────────────────────────────
                 TokenKind::Semi => {
-                    self.flush_blank_lines();
-                    self.pending_type = false;
-                    self.pending_extern_c = false;
-                    self.write(";");
-                    // Don't emit newline if we're inside parens (for-loop header).
-                    if self.paren_depth == 0 {
-                        self.assign_col = None;
-                        // If a trailing inline comment follows on the same source
-                        // line, let the CommentLine handler close the line instead.
-                        if self.peek_inline_comment(tok.span.line) {
-                            // nothing — CommentLine will emit the trailing \n
-                        } else {
-                            self.nl();
-                            self.skip_next_newline = true;
-                        }
-                        // Signal that the next token starts a new statement so the
-                        // var-decl-block state machine can evaluate it.
-                        if self.in_var_decl_block {
-                            let top = self.brace_stack.last();
-                            let is_func_top = top == Some(&BraceCtx::Function)
-                                || (top == Some(&BraceCtx::Block) && self.brace_stack.len() == 1);
-                            if is_func_top {
-                                self.at_func_stmt_start = true;
-                            }
-                        }
-                    }
-                    self.set_prev(TokenKind::Semi);
+                    self.fmt_semi(&tok);
                 }
 
                 // ── Paren depth tracking ──────────────────────────────────────
                 TokenKind::LParen => {
-                    self.flush_blank_lines();
-                    let is_cast = self.next_is_type_kw()
-                        && !self.prev_is_sizeof_like()
-                        && !self.prev.is_some_and(|p| p.is_control_kw());
-                    self.cast_paren_stack.push(is_cast);
-                    if self.at_line_start {
-                        self.indent();
-                    } else if self.needs_space(TokenKind::LParen) {
-                        self.space();
-                    } else if self.next_is_fn_ptr_declarator()
-                        && matches!(
-                            self.prev,
-                            Some(TokenKind::Keyword | TokenKind::Ident | TokenKind::RParen)
-                        )
-                    {
-                        // function-pointer declarator: `void (*Fn)(...)` needs space before `(`
-                        self.space();
-                    }
-                    self.write("(");
-                    self.paren_depth += 1;
-                    // When space_inside_parens is Add (or Preserve with source space),
-                    // the first argument starts one column later; include that offset
-                    // so continuation lines align with it rather than the bare `(`.
-                    let extra = match self.config.spacing.space_inside_parens {
-                        SpaceOption::Add => 1,
-                        SpaceOption::Remove => 0,
-                        // Peek at the raw next token to see if source has a space.
-                        SpaceOption::Preserve => usize::from(matches!(
-                            self.tokens.get(self.pos),
-                            Some(t) if t.kind == TokenKind::Whitespace
-                        )),
-                    };
-                    self.paren_col_stack.push(self.current_col + extra);
-                    // Precompute the EOL continuation column: base indent of
-                    // this line plus one indent width per paren opened on it.
-                    let indent_width = self.config.indent.width as usize;
-                    let parens_on_line =
-                        (self.paren_depth - self.line_start_paren_depth) as usize;
-                    let eol_col = self.line_indent_col + parens_on_line * indent_width;
-                    self.paren_eol_stack.push((false, eol_col));
-                    self.set_prev(TokenKind::LParen);
+                    self.fmt_lparen();
                 }
                 TokenKind::RParen => {
-                    self.flush_blank_lines();
-                    if self.at_line_start {
-                        self.align_to_paren();
-                    } else {
-                        let want = match self.config.spacing.space_inside_parens {
-                            SpaceOption::Add => true,
-                            SpaceOption::Remove => false,
-                            SpaceOption::Preserve => self.src_had_inline_ws,
-                        };
-                        if want {
-                            self.space();
-                        }
-                    }
-                    self.write(")");
-                    self.paren_depth = self.paren_depth.saturating_sub(1);
-                    self.paren_col_stack.pop();
-                    self.paren_eol_stack.pop();
-                    let is_cast_close = self.cast_paren_stack.pop().unwrap_or(false);
-                    // A pointer declarator `*`/`&` immediately before `)` (e.g.
-                    // `sizeof(char *)`) sets suppress_next_space, but that flag
-                    // must not leak out of the closing paren into subsequent tokens.
-                    self.suppress_next_space = false;
-                    self.prev = Some(TokenKind::RParen);
-                    self.last_was_template_close = false;
-                    self.last_was_cast_close = is_cast_close;
+                    self.fmt_rparen();
                 }
 
                 // ── Bracket depth tracking ────────────────────────────────────
                 TokenKind::LBracket => {
-                    self.flush_blank_lines();
-                    self.write("[");
-                    self.bracket_depth += 1;
-                    self.set_prev(TokenKind::LBracket);
+                    self.fmt_lbracket();
                 }
                 TokenKind::RBracket => {
-                    self.flush_blank_lines();
-                    if !self.at_line_start {
-                        let want = match self.config.spacing.space_inside_brackets {
-                            SpaceOption::Add => true,
-                            SpaceOption::Remove => false,
-                            SpaceOption::Preserve => self.src_had_inline_ws,
-                        };
-                        if want {
-                            self.space();
-                        }
-                    }
-                    self.write("]");
-                    self.bracket_depth = self.bracket_depth.saturating_sub(1);
-                    self.set_prev(TokenKind::RBracket);
+                    self.fmt_rbracket();
                 }
 
                 // ── Colon after case / default / access specifier / ternary ──
                 TokenKind::Colon => {
-                    self.flush_blank_lines();
-                    // Ternary `:` gets a space before it; case/label/access/goto do not.
-                    if self.ternary_depth > 0
-                        && !self.in_case_label
-                        && !self.in_access_label
-                        && !self.in_goto_label
-                    {
-                        self.ternary_depth = self.ternary_depth.saturating_sub(1);
-                        if !self.at_line_start {
-                            self.space();
-                        }
-                    } else if !self.in_case_label
-                        && !self.in_access_label
-                        && !self.in_goto_label
-                        && self.prev == Some(TokenKind::Ident)
-                        && self.peek_non_ws_kind() == Some(TokenKind::LitInt)
-                        && self
-                            .brace_stack
-                            .last()
-                            .is_some_and(|ctx| *ctx == BraceCtx::Type)
-                    {
-                        // Bitfield colon: `field:N` → `field : N`
-                        if !self.at_line_start {
-                            self.space();
-                        }
-                    }
-                    self.write(":");
-                    let is_case_colon = self.in_case_label;
-                    if self.in_case_label {
-                        self.in_case_label = false;
-                        self.nl();
-                        self.skip_next_newline = true;
-                        if self.config.indent.indent_switch_case {
-                            self.indent_level += 1;
-                            if let Some(active) = self.case_body_stack.last_mut() {
-                                *active = true;
-                            }
-                        }
-                    } else if self.in_access_label {
-                        self.in_access_label = false;
-                        self.nl();
-                        self.skip_next_newline = true;
-                    } else if self.in_goto_label {
-                        self.in_goto_label = false;
-                        self.nl();
-                        self.skip_next_newline = true;
-                    }
-                    self.set_prev(TokenKind::Colon);
-                    // Set AFTER set_prev() so set_prev() doesn't clear it.
-                    self.last_was_case_colon = is_case_colon;
+                    self.fmt_colon();
                 }
 
                 // ── switch keyword — arm to set pending_switch ────────────────
                 TokenKind::KwSwitch => {
-                    self.flush_blank_lines();
-                    if self.at_line_start {
-                        self.indent();
-                    } else if self.needs_space(tok.kind) {
-                        self.space();
-                    }
-                    self.pending_switch = true;
-                    self.write(tok.lexeme);
-                    self.set_prev(tok.kind);
+                    self.fmt_kw_switch(&tok);
                 }
 
                 // ── case / default labels ─────────────────────────────────────
                 TokenKind::KwCase | TokenKind::KwDefault => {
-                    self.flush_blank_lines();
-                    if self.at_line_start {
-                        if self.config.indent.indent_switch_case {
-                            // Undo any prior case-body extra indent, then print
-                            // at the switch-body level (no additional dedent).
-                            if let Some(active) = self.case_body_stack.last_mut() {
-                                if *active {
-                                    self.indent_level = self.indent_level.saturating_sub(1);
-                                    *active = false;
-                                }
-                            }
-                            self.indent();
-                        } else {
-                            // Dedent one level relative to the switch body.
-                            let saved = self.indent_level;
-                            if self.switch_depth > 0 && self.indent_level > 0 {
-                                self.indent_level -= 1;
-                            }
-                            self.indent();
-                            self.indent_level = saved;
-                        }
-                    } else if self.needs_space(tok.kind) {
-                        self.space();
-                    }
-                    self.in_case_label = true;
-                    self.write(tok.lexeme);
-                    self.set_prev(tok.kind);
+                    self.fmt_kw_case_default(&tok);
                 }
 
                 // ── Access specifiers — dedented to class body level ──────────
                 TokenKind::KwPublic | TokenKind::KwPrivate | TokenKind::KwProtected => {
-                    self.flush_blank_lines();
-                    if self.at_line_start && self.class_depth > 0 {
-                        let saved = self.indent_level;
-                        if self.indent_level > 0 {
-                            self.indent_level -= 1;
-                        }
-                        self.indent();
-                        self.indent_level = saved;
-                        self.in_access_label = true;
-                    } else if !self.at_line_start && self.needs_space(tok.kind) {
-                        self.space();
-                    }
-                    self.write(tok.lexeme);
-                    self.set_prev(tok.kind);
+                    self.fmt_access_specifier(&tok);
                 }
 
                 // ── Template angle brackets ───────────────────────────────────
@@ -2969,105 +3126,26 @@ impl<'src> Fmt<'src> {
                         Some(TokenKind::Ident | TokenKind::KwTemplate | TokenKind::Gt)
                     ) && self.looks_like_template_open() =>
                 {
-                    self.flush_blank_lines();
-                    // No space between the name and `<`: `vector<int>` not `vector <int>`.
-                    if self.at_line_start {
-                        self.indent();
-                    }
-                    self.write("<");
-                    self.template_depth += 1;
-                    if self.config.spacing.space_inside_angle_brackets {
-                        self.space();
-                    }
-                    self.set_prev(TokenKind::Lt);
+                    self.fmt_template_open();
                 }
 
                 TokenKind::Gt if self.template_depth > 0 => {
-                    self.flush_blank_lines();
-                    if self.config.spacing.space_inside_angle_brackets && !self.at_line_start {
-                        self.space();
-                    } else if self.at_line_start {
-                        self.indent();
-                    }
-                    self.write(">");
-                    self.template_depth -= 1;
-                    self.prev = Some(TokenKind::Gt);
-                    self.last_was_template_close = true;
+                    self.fmt_template_close_single();
                 }
 
                 // `>>` closing two nested template levels: `vector<vector<int>>`
                 TokenKind::GtGt if self.template_depth >= 2 => {
-                    self.flush_blank_lines();
-                    if self.config.spacing.space_inside_angle_brackets && !self.at_line_start {
-                        self.space();
-                    } else if self.at_line_start {
-                        self.indent();
-                    }
-                    self.write(">>");
-                    self.template_depth -= 2;
-                    self.prev = Some(TokenKind::Gt);
-                    self.last_was_template_close = true;
+                    self.fmt_template_close_double();
                 }
 
                 // ── Pointer / reference declarator ───────────────────────────
                 TokenKind::Star | TokenKind::Amp if self.is_ptr_decl_context() => {
-                    self.flush_blank_lines();
-                    match self.config.spacing.pointer_align {
-                        PointerAlign::Middle => {
-                            // Same as binary-op: space on both sides.
-                            if self.at_line_start {
-                                self.indent();
-                            } else if self.needs_space(tok.kind) {
-                                self.space();
-                            }
-                        }
-                        PointerAlign::Type => {
-                            // Star/amp attached to the type — no space before.
-                            if self.at_line_start {
-                                self.indent();
-                            }
-                            // Deliberately no space() call here.
-                        }
-                        PointerAlign::Name => {
-                            // Star/amp attached to the name — space before (only
-                            // between type and first star; consecutive stars/amps
-                            // stay together), suppress space after.
-                            if self.at_line_start {
-                                self.indent();
-                            } else if !matches!(self.prev, Some(TokenKind::Star | TokenKind::Amp)) {
-                                self.space();
-                            }
-                            self.suppress_next_space = true;
-                        }
-                    }
-                    self.write(tok.lexeme);
-                    self.set_prev(tok.kind);
+                    self.fmt_ptr_decl(&tok);
                 }
 
                 // ── Unary / binary * & + - (non-declarator) ─────────────────
-                // In unary context, suppress the space after the op so `*ptr`,
-                // `&x`, `-1`, `+x` stay compact.
                 TokenKind::Star | TokenKind::Amp | TokenKind::Plus | TokenKind::Minus => {
-                    self.flush_blank_lines();
-                    // At line start (e.g. `*ptr = ...` after a standalone block
-                    // comment) the operator is always unary, never binary — even
-                    // if the previous emitted token was a CommentBlock which
-                    // satisfies ends_expr().
-                    // After a cast-close `)`, * and & are always unary (dereference /
-                    // address-of), never binary multiplication / bitwise-and.
-                    let is_binary = !self.at_line_start
-                        && !self.last_was_cast_close
-                        && self.prev.is_some_and(|p| p.ends_expr());
-                    if self.at_line_start {
-                        self.indent();
-                    } else if self.needs_space(tok.kind) {
-                        self.space();
-                    }
-                    if !is_binary {
-                        self.suppress_next_space = true;
-                    }
-                    self.write(tok.lexeme);
-                    self.set_prev(tok.kind);
+                    self.fmt_unary_binary(&tok);
                 }
 
                 // ── Type keywords — mark pending_type for brace context ──────
@@ -3075,39 +3153,12 @@ impl<'src> Fmt<'src> {
                 | TokenKind::KwStruct
                 | TokenKind::KwUnion
                 | TokenKind::KwEnum => {
-                    self.flush_blank_lines();
-                    if self.at_line_start {
-                        self.indent();
-                    } else if self.needs_space(tok.kind) {
-                        self.space();
-                    }
-                    self.pending_type = true;
-                    self.write(tok.lexeme);
-                    self.set_prev(tok.kind);
+                    self.fmt_type_kw(&tok);
                 }
 
                 // ── Comma — newline after each element in large initializers ──
                 TokenKind::Comma => {
-                    self.flush_blank_lines();
-                    if self.at_line_start {
-                        self.indent();
-                    }
-                    self.write(",");
-                    // A comma at statement level ends the current assignment expression.
-                    if self.paren_depth == 0 && self.bracket_depth == 0 {
-                        self.assign_col = None;
-                    }
-                    if self.large_init_stack.last() == Some(&true) && self.paren_depth == 0 {
-                        // If a trailing line comment follows on the same source line,
-                        // let the CommentLine handler close the line instead.
-                        if self.peek_inline_line_comment(tok.span.line) {
-                            // nothing — CommentLine will emit the trailing \n
-                        } else {
-                            self.nl();
-                            self.skip_next_newline = true;
-                        }
-                    }
-                    self.set_prev(TokenKind::Comma);
+                    self.fmt_comma(&tok);
                 }
 
                 // ── Assignment operators — track RHS column for continuation ──
@@ -3122,20 +3173,7 @@ impl<'src> Fmt<'src> {
                 | TokenKind::CaretEq
                 | TokenKind::LtLtEq
                 | TokenKind::GtGtEq => {
-                    self.flush_blank_lines();
-                    if self.at_line_start {
-                        self.indent();
-                    } else if self.needs_space(tok.kind) {
-                        self.space();
-                    }
-                    self.write(tok.lexeme);
-                    if self.paren_depth == 0 && self.bracket_depth == 0 && self.assign_col.is_none()
-                    {
-                        let space = usize::from(self.config.spacing.space_around_binary_ops);
-                        self.assign_col = Some(self.current_col + space);
-                        self.assign_eol = false;
-                    }
-                    self.set_prev(tok.kind);
+                    self.fmt_assign_op(&tok);
                 }
 
                 // ── Goto labels: `identifier:` at statement level ─────────────
@@ -3150,41 +3188,12 @@ impl<'src> Fmt<'src> {
                         && !self.in_access_label
                         && self.peek_non_ws_kind() == Some(TokenKind::Colon) =>
                 {
-                    self.flush_blank_lines();
-                    // Emit at column 0 — no indentation call.
-                    self.write(tok.lexeme);
-                    self.in_goto_label = true;
-                    self.set_prev(tok.kind);
+                    self.fmt_goto_label_ident(&tok);
                 }
 
                 // ── Everything else ───────────────────────────────────────────
                 _ => {
-                    self.flush_blank_lines();
-
-                    if self.at_line_start {
-                        self.indent();
-                    } else if self.needs_space(tok.kind) {
-                        self.space();
-                    }
-
-                    // Track `extern "C"` sequence for ExternC brace context.
-                    // Keep the flag alive across the LitStr (`"C"`); set it on `extern`;
-                    // clear it on anything else that breaks the sequence.
-                    if !(tok.kind == TokenKind::LitStr && self.pending_extern_c) {
-                        self.pending_extern_c =
-                            tok.kind == TokenKind::Keyword && tok.lexeme == "extern";
-                    }
-
-                    self.write(tok.lexeme);
-                    self.set_prev(tok.kind);
-                    // `operator` keyword — suppress spacing before the overloaded symbol.
-                    if tok.kind == TokenKind::Keyword && tok.lexeme == "operator" {
-                        self.after_operator_kw = true;
-                    }
-                    // Ternary `?` — track depth so the matching `:` gets spaces.
-                    if tok.kind == TokenKind::Question {
-                        self.ternary_depth += 1;
-                    }
+                    self.fmt_default_token(&tok);
                 }
             }
         }
@@ -3198,6 +3207,47 @@ impl<'src> Fmt<'src> {
 
         Ok(self.output)
     }
+}
+
+/// Formats the tokens of an inline initializer body (between `{` and `}`) into
+/// a string including the closing `}`.  Returns `}` for empty initializers.
+fn render_inline_init(content: &[(&str, TokenKind)]) -> String {
+    if content.is_empty() {
+        return "}".to_string();
+    }
+    let mut out = String::from(" ");
+    let mut prev_kind = TokenKind::LBrace;
+    let mut suppress = false;
+    for (lex, kind) in content {
+        // No space before . or -> only when it's member access (prev ends an
+        // expression).  Designated initializer .field comes after , or { and
+        // does need a space.
+        let need_space = !(suppress
+            || matches!(kind, TokenKind::Comma | TokenKind::RParen)
+            || matches!(
+                prev_kind,
+                TokenKind::LBrace | TokenKind::Dot | TokenKind::Arrow | TokenKind::LParen
+            )
+            || matches!(kind, TokenKind::Dot | TokenKind::Arrow) && prev_kind.ends_expr()
+            || matches!(kind, TokenKind::LParen) && prev_kind.ends_expr());
+        if need_space {
+            out.push(' ');
+        }
+        suppress = false;
+        out.push_str(lex);
+        // Unary context: after any non-expression-ending token (=, comma, {,
+        // (, etc.), - + * & are unary — suppress space between op and operand.
+        if matches!(
+            kind,
+            TokenKind::Minus | TokenKind::Plus | TokenKind::Star | TokenKind::Amp
+        ) && !prev_kind.ends_expr()
+        {
+            suppress = true;
+        }
+        prev_kind = *kind;
+    }
+    out.push_str(" }");
+    out
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -3251,9 +3301,6 @@ pub fn format<'src>(tokens: &[Token<'src>], config: &Config) -> Result<String, F
     };
     Ok(output)
 }
-
-/// Normalizes the whitespace between `#endif` and a trailing `/*` comment to
-/// exactly `spaces` spaces. Lines with no `/*` are returned unchanged.
 
 /// Scan `s` and insert a space after every `,` that is not already followed
 /// by whitespace and is not inside a string/char literal or comment.
@@ -3336,7 +3383,10 @@ fn add_space_after_comma(s: &str) -> String {
             ',' => {
                 out.push(',');
                 // Insert a space unless next char is already whitespace.
-                if !matches!(chars.peek(), None | Some(' ') | Some('\t') | Some('\n') | Some('\r')) {
+                if !matches!(
+                    chars.peek(),
+                    None | Some(' ') | Some('\t') | Some('\n') | Some('\r')
+                ) {
                     out.push(' ');
                 }
             }
@@ -3371,7 +3421,7 @@ fn format_preproc_if_condition(line: &str, nl: &str) -> String {
         Some(s) => s,
         None => return line.to_string(),
     };
-    let after_hash = after_hash.trim_start_matches(|c: char| c == ' ' || c == '\t');
+    let after_hash = after_hash.trim_start_matches([' ', '\t']);
     let (kw, rest) = if after_hash.starts_with("elif")
         && !after_hash[4..].starts_with(|c: char| c.is_alphanumeric() || c == '_')
     {
@@ -3384,7 +3434,7 @@ fn format_preproc_if_condition(line: &str, nl: &str) -> String {
         return line.to_string();
     };
 
-    let condition_and_rest = rest.trim_start_matches(|c: char| c == ' ' || c == '\t');
+    let condition_and_rest = rest.trim_start_matches([' ', '\t']);
 
     // Separate any trailing `/* comment */` from the condition.
     let (condition_raw, trailing_comment) = if let Some(pos) = condition_and_rest.find("/*") {
@@ -3408,7 +3458,10 @@ fn format_preproc_if_condition(line: &str, nl: &str) -> String {
 /// Operator-only predicate: returns true for characters that begin/continue
 /// an operator token in a preprocessor condition.
 fn is_preproc_op_char(c: char) -> bool {
-    matches!(c, '>' | '<' | '!' | '=' | '&' | '|' | '+' | '-' | '*' | '/' | '%' | '~' | '^')
+    matches!(
+        c,
+        '>' | '<' | '!' | '=' | '&' | '|' | '+' | '-' | '*' | '/' | '%' | '~' | '^'
+    )
 }
 
 /// Reformat a preprocessor condition expression with spaces around binary
@@ -3582,9 +3635,6 @@ fn format_preproc_expr(expr: &str) -> String {
                     prev_tk,
                     Some(TK::Ident) | Some(TK::Number) | Some(TK::RParen)
                 );
-                if needs_space || (out.ends_with(' ') && false) {
-                    // `out.ends_with(' ')` is already handled by Op above.
-                }
                 if needs_space {
                     out.push(' ');
                 }
@@ -3809,8 +3859,7 @@ fn enum_eq_col(line: &str) -> Option<usize> {
 /// `/* ... */` block comments (including `/** ... */` doc comments).
 fn is_enum_comment_line(line: &str) -> bool {
     let trimmed = line.trim_start();
-    trimmed.starts_with("//")
-        || (trimmed.starts_with("/*") && trimmed.trim_end().ends_with("*/"))
+    trimmed.starts_with("//") || (trimmed.starts_with("/*") && trimmed.trim_end().ends_with("*/"))
 }
 
 /// True when `line` looks like a bare enum member with no explicit value
@@ -5093,8 +5142,7 @@ mod tests {
         let src = "/*\n * A.\n */\n\n\n/*\n * B.\n */\n";
         let out = fmt(src);
         assert_eq!(
-            out,
-            "/*\n * A.\n */\n\n\n/*\n * B.\n */\n",
+            out, "/*\n * A.\n */\n\n\n/*\n * B.\n */\n",
             "two blank lines between block comments collapsed:\n{out}"
         );
     }
@@ -5118,7 +5166,10 @@ mod tests {
         let lines: Vec<&str> = out.lines().collect();
         // Find the /* heading line and the ** continuation line.
         let open_idx = lines.iter().position(|l| l.contains("/* heading")).unwrap();
-        let cont_idx = lines.iter().position(|l| l.contains("** continuation")).unwrap();
+        let cont_idx = lines
+            .iter()
+            .position(|l| l.contains("** continuation"))
+            .unwrap();
         let open_col = lines[open_idx].find('/').unwrap();
         let cont_col = lines[cont_idx].find('*').unwrap();
         assert_eq!(
@@ -5636,7 +5687,10 @@ mod tests {
         assert_eq!(arg_lines.len(), 2, "expected 2 arg lines, got:\n{out}");
         // get_type( is at indent+1 = 16 spaces; args must be at 16+4 = 20.
         let indent = arg_lines[0].len() - arg_lines[0].trim_start().len();
-        assert_eq!(indent, 20, "args after assign-continuation EOL paren must be at 20 spaces, got:\n{out}");
+        assert_eq!(
+            indent, 20,
+            "args after assign-continuation EOL paren must be at 20 spaces, got:\n{out}"
+        );
     }
 
     #[test]
@@ -5651,7 +5705,10 @@ mod tests {
         assert_eq!(arg_lines.len(), 2, "expected 2 arg lines, got:\n{out}");
         // if ( is at level 2 = 8 spaces; 2 parens opened → 8 + 2*4 = 16.
         let indent = arg_lines[0].len() - arg_lines[0].trim_start().len();
-        assert_eq!(indent, 16, "args inside if(call( EOL paren must be at 16 spaces, got:\n{out}");
+        assert_eq!(
+            indent, 16,
+            "args inside if(call( EOL paren must be at 16 spaces, got:\n{out}"
+        );
     }
 
     #[test]

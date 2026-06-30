@@ -540,6 +540,9 @@ struct Fmt<'src> {
     /// Set when the declaration run ends; causes flush_blank_lines to inject a
     /// blank line before the first non-declaration statement.
     force_blank_after_decls: bool,
+    /// Set when `->` is determined to be a C++ trailing return type specifier.
+    /// Cleared when `{` or `;` is emitted.
+    after_trailing_return_arrow: bool,
     /// True while inside a /* funky:off */ … /* funky:on */ region.
     /// All tokens are passed through verbatim; no formatting rules apply.
     format_off: bool,
@@ -593,6 +596,7 @@ impl<'src> Fmt<'src> {
             at_func_stmt_start: false,
             saw_func_decl: false,
             force_blank_after_decls: false,
+            after_trailing_return_arrow: false,
             format_off: false,
         }
     }
@@ -1398,7 +1402,98 @@ impl<'src> Fmt<'src> {
         )
     }
 
+    /// Returns `true` when the `->` token at `self.pos - 1` is a C++ trailing
+    /// return type specifier (e.g. `auto foo() -> int`), as opposed to a member
+    /// access operator (e.g. `p->field`).
+    ///
+    /// Heuristic: the `->` is a trailing return when the preceding non-whitespace
+    /// token is `)` that closes a function parameter list — i.e. there is a
+    /// return-type token (keyword, identifier, `*`, etc.) before the function name.
+    fn arrow_is_trailing_return(&self) -> bool {
+        if self.prev != Some(TokenKind::RParen) {
+            return false;
+        }
+        // Arrow is at self.pos - 1.  Scan backward to find the RParen.
+        let arrow_i = self.pos - 1;
+        let mut i = arrow_i;
+        loop {
+            if i == 0 {
+                return false;
+            }
+            i -= 1;
+            match self.tokens[i].kind {
+                TokenKind::Whitespace | TokenKind::Newline => continue,
+                TokenKind::RParen => break,
+                _ => return false,
+            }
+        }
+        // i = the RParen.  Find the matching `(`.
+        let mut depth = 1usize;
+        loop {
+            if i == 0 {
+                return false;
+            }
+            i -= 1;
+            match self.tokens[i].kind {
+                TokenKind::RParen => depth += 1,
+                TokenKind::LParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        // i = the `(`.  Find the name token immediately before it.
+        while i > 0 {
+            i -= 1;
+            if !matches!(
+                self.tokens[i].kind,
+                TokenKind::Whitespace | TokenKind::Newline
+            ) {
+                break;
+            }
+        }
+        // Scan backward past the qualified name (ColonColon, Tilde) to find
+        // the token that precedes the entire name.
+        loop {
+            if i == 0 {
+                return false;
+            }
+            i -= 1;
+            match self.tokens[i].kind {
+                TokenKind::Whitespace | TokenKind::Newline => continue,
+                TokenKind::ColonColon | TokenKind::Tilde => continue,
+                // A return-type token before the name — this is a function
+                // definition, so `->` is the trailing return specifier.
+                TokenKind::Ident
+                | TokenKind::Keyword
+                | TokenKind::KwStruct
+                | TokenKind::KwClass
+                | TokenKind::KwUnion
+                | TokenKind::KwEnum
+                | TokenKind::KwTypename
+                | TokenKind::Star
+                | TokenKind::Amp
+                | TokenKind::Gt
+                | TokenKind::RParen => return true,
+                // Statement boundary without a preceding return type — this is
+                // a call expression, so `->` is member access.
+                TokenKind::Semi
+                | TokenKind::LBrace
+                | TokenKind::RBrace
+                | TokenKind::PreprocLine => return false,
+                _ => return false,
+            }
+        }
+    }
+
     fn infer_brace_ctx(&self) -> BraceCtx {
+        // A trailing return type means the `{` is always a function body.
+        if self.after_trailing_return_arrow {
+            return BraceCtx::Function;
+        }
         let prev = match self.prev_through_comments() {
             Some(k) => k,
             None => return BraceCtx::Other,
@@ -1912,6 +2007,11 @@ impl<'src> Fmt<'src> {
             return false;
         }
 
+        // After a C++ trailing return type `->`, space before the return type.
+        if prev == TokenKind::Arrow && self.after_trailing_return_arrow {
+            return true;
+        }
+
         // No space around member access / scope
         if matches!(
             prev,
@@ -2229,6 +2329,7 @@ impl<'src> Fmt<'src> {
         self.flush_blank_lines();
         self.pending_type = false;
         self.pending_extern_c = false;
+        self.after_trailing_return_arrow = false;
         self.write(";");
         // Don't emit newline if we're inside parens (for-loop header).
         if self.paren_depth == 0 {
@@ -2853,6 +2954,7 @@ impl<'src> Fmt<'src> {
                 self.pending_switch = false;
                 self.pending_type = false;
                 self.pending_extern_c = false;
+                self.after_trailing_return_arrow = false;
                 self.set_prev(TokenKind::RBrace);
                 return true;
             }
@@ -2878,6 +2980,7 @@ impl<'src> Fmt<'src> {
         self.pending_switch = false;
         self.pending_type = false;
         self.pending_extern_c = false;
+        self.after_trailing_return_arrow = false;
         // `{` takes over indentation; = alignment no longer applies.
         self.assign_col = None;
         let is_large_init = ctx == BraceCtx::Other
@@ -3268,6 +3371,23 @@ impl<'src> Fmt<'src> {
                         && self.peek_non_ws_kind() == Some(TokenKind::Colon) =>
                 {
                     self.fmt_goto_label_ident(&tok);
+                }
+
+                // ── C++ trailing return type arrow `->` ──────────────────────
+                // Detect `auto foo() -> int` vs member access `p->field`.
+                // When it is a trailing return, emit spaces on both sides and
+                // set `after_trailing_return_arrow` so the subsequent `{` is
+                // correctly classified as a function body brace.
+                TokenKind::Arrow if self.arrow_is_trailing_return() => {
+                    self.flush_blank_lines();
+                    if self.at_line_start {
+                        self.indent();
+                    } else {
+                        self.space();
+                    }
+                    self.write(tok.lexeme);
+                    self.after_trailing_return_arrow = true;
+                    self.set_prev(tok.kind);
                 }
 
                 // ── Everything else ───────────────────────────────────────────
@@ -7471,6 +7591,29 @@ mod tests {
         assert!(out.contains("int x = 1;"), "got:\n{out}");
         assert!(out.contains("int y = 2;"), "got:\n{out}");
         assert!(out.contains("/* funky:on */"), "marker should survive:\n{out}");
+    }
+
+    #[test]
+    fn cpp_trailing_return_type_spaces_and_brace() {
+        // `auto foo(Foo *x)->int` — trailing return type arrow needs spaces on
+        // both sides and the opening brace must be classified as a function body.
+        // Inner `x->a` and `foo()->b` must keep member-access spacing (no spaces).
+        let src = "auto foo(Foo *x)->int {\n    x->a;\n    foo()->b;\n}\n";
+        let out = fmt(src);
+        // Space before and after the trailing return arrow.
+        assert!(
+            out.contains("-> int"),
+            "trailing return arrow must have spaces around it; got:\n{out}"
+        );
+        // Member access inside the body must NOT have spaces.
+        assert!(
+            out.contains("x->a"),
+            "member access `x->a` must not gain spaces; got:\n{out}"
+        );
+        assert!(
+            out.contains("foo()->b"),
+            "member access `foo()->b` must not gain spaces; got:\n{out}"
+        );
     }
 
     #[test]

@@ -73,7 +73,24 @@ fn find_compiler(is_cpp: bool) -> Option<&'static str> {
     })
 }
 
+/// Returns `true` when the file has a `//@ ` annotation line at the top,
+/// indicating it is a test for a custom compiler and may use constructs that
+/// GCC/Clang reject.  Compile checks are skipped for such files.
+fn has_custom_compiler_annotations(source_path: &Path) -> bool {
+    let Ok(content) = fs::read_to_string(source_path) else {
+        return false;
+    };
+    content.lines().take(5).any(|l| l.starts_with("//@"))
+}
+
 fn check_compiles(source_path: &Path) {
+    if has_custom_compiler_annotations(source_path) {
+        eprintln!(
+            "skip compile check for {} (custom-compiler test file)",
+            source_path.display()
+        );
+        return;
+    }
     let ext = source_path
         .extension()
         .and_then(|e| e.to_str())
